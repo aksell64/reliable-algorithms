@@ -219,7 +219,12 @@ func (n *Node) stopOnce() {
 
 func (n *Node) startEpoch() {
 	node := newEpochConsensus(n.self, n.beb, n.pl, n.processesCount, &n.logger)
-	node.StartEpoch(n.ctx, n.leader, n.ets, *n.state)
+
+	var state State
+	if n.state != nil {
+		state = *n.state
+	}
+	node.StartEpoch(n.ctx, n.leader, n.ets, state)
 
 	n.wg.Add(1)
 	go n.waitFinishEpoch(node)
