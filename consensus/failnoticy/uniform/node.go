@@ -23,13 +23,26 @@ type proposeEnvelope struct {
 	val types.Value
 }
 
+type EpochConsensus interface {
+	StartEpoch(
+		ctx context.Context,
+		leader types.ProcessID,
+		epoch int,
+		current State,
+	)
+	Propose(value types.Value)
+	Abort()
+	Aborted() <-chan AbortedState
+	Decided() chan types.Value
+}
+
 type Node struct {
 	types.Deliverer
 	ctx            context.Context
 	cancel         context.CancelFunc
 	self           types.ProcessID
 	processesCount int
-	inner          *epochConsensus
+	inner          EpochConsensus
 	epochChanger   *LeaderBasedEpochChanger
 	newTs          int
 	newLeader      types.ProcessID
@@ -205,8 +218,8 @@ func (n *Node) stopOnce() {
 }
 
 func (n *Node) startEpoch() {
-	node := newEpochConsensus(n.self, n.beb, n.pl, n.processesCount)
-	node.StartEpoch(n.ctx, n.leader, n.ets, n.state)
+	node := newEpochConsensus(n.self, n.beb, n.pl, n.processesCount, &n.logger)
+	node.StartEpoch(n.ctx, n.leader, n.ets, *n.state)
 
 	n.wg.Add(1)
 	go n.waitFinishEpoch(node)

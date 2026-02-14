@@ -212,3 +212,7 @@ func TriggerSync(ctx context.Context, ch chan struct{}) {
 	case ch <- struct{}{}:
 	}
 }
+
+func Ptr[T any](v T) *T {
+	return &v
+}

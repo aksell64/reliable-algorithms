@@ -1,6 +1,10 @@
 package types
 
-import "github.com/google/uuid"
+import (
+	"sync"
+
+	"github.com/google/uuid"
+)
 
 type DelivererOption func(*delivererConfig)
 
@@ -69,6 +73,7 @@ type multyDeliverer struct {
 	UnimplementedDeliverer
 	fallbackDeliverers []Deliverer
 	routes             map[string][]Deliverer
+	mu                 sync.RWMutex
 }
 
 func NewUnaryDeliverer(pid ProcessID) Deliverer {
@@ -101,20 +106,36 @@ func (md *multyDeliverer) Instance() string {
 }
 
 func (md *multyDeliverer) Deliver(msg Message) {
-	if routed, ok := md.routes[msg.Name()]; ok {
-		for _, d := range routed {
-			d.Deliver(msg)
-		}
-		return
-	}
-
-	for _, d := range md.fallbackDeliverers {
+	deliverers := md.getDeliverers(msg)
+	for _, d := range deliverers {
 		d.Deliver(msg)
 	}
 }
 
+func (md *multyDeliverer) getDeliverers(msg Message) []Deliverer {
+	deliverers := make([]Deliverer, 0)
+
+	md.mu.RLock()
+	defer md.mu.RUnlock()
+
+	if routed, ok := md.routes[msg.Name()]; ok {
+		for _, d := range routed {
+			deliverers = append(deliverers, d)
+		}
+		return deliverers
+	}
+
+	for _, d := range md.fallbackDeliverers {
+		deliverers = append(deliverers, d)
+	}
+	return deliverers
+}
+
 func (md *multyDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOption) {
 	cfg := buildDelivererConfig(opts)
+
+	md.mu.Lock()
+	defer md.mu.Unlock()
 
 	if len(cfg.msgNames) > 0 {
 		for _, name := range cfg.msgNames {
@@ -127,6 +148,8 @@ func (md *multyDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOption) {
 }
 
 func (md *multyDeliverer) RemoveDeliverer(delivererToRemove Deliverer) {
+	md.mu.Lock()
+	defer md.mu.Unlock()
 	md.removeDeliverer(delivererToRemove)
 }
 

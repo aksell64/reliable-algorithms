@@ -104,6 +104,24 @@ type Worker interface {
 	Stop()
 }
 
+func InitWorkers(workers ...Worker) {
+	for _, w := range workers {
+		w.Init()
+	}
+}
+
+func StartWorkers(workers ...Worker) {
+	for _, w := range workers {
+		w.Start()
+	}
+}
+
+func StopWorkers(workers ...Worker) {
+	for _, w := range workers {
+		w.Stop()
+	}
+}
+
 type WorkerOnce struct {
 	initOnce  sync.Once
 	startOnce sync.Once

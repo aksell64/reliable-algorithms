@@ -17,7 +17,7 @@ const (
 type initEvent struct {
 	epochTs int
 	leader  types.ProcessID
-	current *State
+	current State
 }
 
 // Все входящие события — обёртки
@@ -32,7 +32,8 @@ type receivedAcceptEvent struct{}
 type decideEvent struct{ val types.Value }
 
 type decidedEvent struct{ val types.Value }
-type abortEvent struct{}
+type abortEvent struct {
+}
 
 type writeEvent struct {
 	state State

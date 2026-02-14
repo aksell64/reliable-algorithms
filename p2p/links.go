@@ -32,11 +32,18 @@ func WithDeliverSleep(min, max time.Duration) LinkOpt {
 	}
 }
 
+func WithNetwork(net network.Network) LinkOpt {
+	return func(link *BaseLink) {
+		link.net = net
+	}
+}
+
 type BaseLink struct {
 	types.Deliverer
 	self             types.ProcessID
 	sendSleepFunc    *func()
 	deliverSleepFunc *func()
+	net              network.Network
 	once             *types.WorkerOnce
 }
 
@@ -45,6 +52,7 @@ func NewBaseLink(id types.ProcessID, opts ...LinkOpt) Link {
 		self:      id,
 		Deliverer: types.NewUnaryDeliverer(id),
 		once:      types.NewWorkerOnce(),
+		net:       network.Global(),
 	}
 
 	for _, opt := range opts {
@@ -55,7 +63,7 @@ func NewBaseLink(id types.ProcessID, opts ...LinkOpt) Link {
 
 func (b *BaseLink) Init() {
 	b.once.Init(func() {
-		network.Connect(b)
+		b.net.Connect(b)
 	})
 }
 
@@ -63,7 +71,6 @@ func (b *BaseLink) Start() {}
 
 func (b *BaseLink) Stop() {
 	b.once.Stop(func() {
-		network.Disconnect(b.ID())
 	})
 }
 
@@ -78,7 +85,7 @@ func (b *BaseLink) Send(to types.ProcessID, msg types.Message) {
 		return
 	}
 
-	network.Send(b.ProcessID(), to, msg)
+	b.net.Send(b.ProcessID(), to, msg)
 }
 
 func (b *BaseLink) Deliver(msg types.Message) {

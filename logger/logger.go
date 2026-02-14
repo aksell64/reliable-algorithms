@@ -51,7 +51,11 @@ type Scope struct {
 }
 
 func NewNodeScopeLogger(pid types.ProcessID, scopes ...Scope) zerolog.Logger {
-	l := NewNodeLogger(pid)
+	return NewNodeScopeLoggerFrom(NewNodeLogger(pid), scopes...)
+}
+
+func NewNodeScopeLoggerFrom(base zerolog.Logger, scopes ...Scope) zerolog.Logger {
+	l := base
 
 	for _, s := range scopes {
 		l = l.With().Str(s.Key, s.Val).Logger()
