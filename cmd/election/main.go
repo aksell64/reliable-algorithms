@@ -47,7 +47,7 @@ func makeElection(
 	baseLink := p2p.NewBaseLink(self /*p2p.WithDeliverSleep(400*time.Millisecond, time.Second)*/)
 	storage := inmemory.NewKVStore()
 
-	e := election.NewLowerEpochElection(ctx, self, processes, storage, baseLink, 2000*time.Millisecond, nil)
+	e := election.NewLowerEpochElection(ctx, self, processes, storage, baseLink, 5*time.Second, nil)
 	return e
 }
 

@@ -64,14 +64,11 @@ func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 				if !ok {
 					return
 				}
-				select {
-				case <-ctx.Done():
-					return
-				case results <- Decided{
+				decided := Decided{
 					ProcessID: node.ProcessID(),
 					Value:     v,
-				}:
 				}
+				results <- decided
 			}
 		}()
 	}

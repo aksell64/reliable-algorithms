@@ -2,6 +2,10 @@ package types
 
 type State string
 
+func (s State) String() string {
+	return string(s)
+}
+
 const SameState = State("same")
 
 type Handler func(ev Event) State

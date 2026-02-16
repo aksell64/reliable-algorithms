@@ -2,14 +2,16 @@ package election
 
 import (
 	"reliable/types"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 type HeartbeatMessage struct {
-	id    uuid.UUID
-	epoch int
-	from  types.ProcessID
+	id     uuid.UUID
+	epoch  int
+	from   types.ProcessID
+	sentAt time.Time
 }
 
 func (msg HeartbeatMessage) Name() string {

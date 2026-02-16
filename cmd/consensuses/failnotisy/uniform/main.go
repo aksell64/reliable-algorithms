@@ -65,6 +65,6 @@ func makeConsensus(
 	store := inmemory.NewKVStore()
 	elect := election.NewLowerEpochElection(ctx, pid, processes, store, fl, 100*time.Millisecond, nil)
 	ec := uniform.NewLeaderBasedEpochChanger(ctx, pid, processes, beb, elect, pl, nil)
-	node := uniform.New(ctx, pid, ec, pl, beb)
+	node := uniform.New(ctx, pid, processes, ec, pl, beb)
 	return node
 }

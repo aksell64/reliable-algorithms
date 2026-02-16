@@ -27,7 +27,9 @@ type receivedReadEvent struct {
 	msg StateMsg
 }
 
-type receivedAcceptEvent struct{}
+type receivedAcceptEvent struct {
+	from types.ProcessID
+}
 
 type decideEvent struct{ val types.Value }
 

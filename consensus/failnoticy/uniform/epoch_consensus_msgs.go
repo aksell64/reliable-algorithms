@@ -12,6 +12,7 @@ const (
 
 type ReadMsg struct {
 	types.Message
+	Ts int
 }
 
 type StateMsg struct {
@@ -23,13 +24,16 @@ type StateMsg struct {
 type WriteMsg struct {
 	types.Message
 	Val *types.Value
+	Ts  int
 }
 
 type AcceptMsg struct {
 	types.Message
+	Ts int
 }
 
 type DecidedMsg struct {
 	types.Message
 	Val types.Value
+	Ts  int
 }

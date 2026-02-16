@@ -18,9 +18,21 @@ import (
 )
 
 const (
+	NewEpochMsgName = "new_epoch"
+	NAckMsgName     = "nack"
+
 	bcastNewEpochDebounceInterval    = 300 * time.Millisecond
 	bcastNewEpochMaxDebounceInterval = bcastNewEpochDebounceInterval * 4
 )
+
+type NewEpochMsg struct {
+	types.Message
+	Ts int
+}
+
+type NAckMsg struct {
+	types.Message
+}
 
 type EpochStarter interface {
 	StartEpoch(ts int, leader types.ProcessID)
@@ -204,7 +216,7 @@ func (ec *LeaderBasedEpochChanger) handleNewEpoch(leader types.ProcessID, ts int
 	ec.mu.Lock()
 
 	if leader == ec.trusted && ts > ec.lastTs {
-		//oldLastTs := ec.lastTs
+		oldLastTs := ec.lastTs
 		ec.lastTs = ts
 		starter := ec.starter
 		ec.mu.Unlock()
@@ -213,12 +225,12 @@ func (ec *LeaderBasedEpochChanger) handleNewEpoch(leader types.ProcessID, ts int
 			starter.StartEpoch(ts, leader)
 		}
 
-		//ec.logger.Info().
-		//	Int("ts", ts).
-		//	Int("oldLastTs", oldLastTs).
-		//	Int("lastTs", ec.lastTs).
-		//	Str("leader", leader.String()).
-		//	Msg("correct leader epoch")
+		ec.logger.Info().
+			Int("ts", ts).
+			Int("oldLastTs", oldLastTs).
+			Int("lastTs", ec.lastTs).
+			Str("leader", leader.String()).
+			Msg("new leader epoch")
 		return
 	}
 
@@ -231,7 +243,7 @@ func (ec *LeaderBasedEpochChanger) handleNewEpoch(leader types.ProcessID, ts int
 
 	ec.mu.Unlock()
 
-	msg := NAck{
+	msg := NAckMsg{
 		Message: messages.NewBase(uuid.New(), ec.self, NAckMsgName),
 	}
 	ec.pl.Send(leader, msg)
@@ -260,7 +272,7 @@ func (ec *LeaderBasedEpochChanger) Deliver(msg types.Message) {
 	switch m := msg.(type) {
 	case NewEpochMsg:
 		ec.handleNewEpoch(m.From(), m.Ts)
-	case NAck:
+	case NAckMsg:
 		ec.handleNAck()
 	}
 }

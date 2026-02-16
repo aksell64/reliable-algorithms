@@ -31,6 +31,8 @@ type LowerEpochElection struct {
 	cancel         context.CancelFunc
 	self           types.ProcessID
 	processes      map[types.ProcessID]types.ProcessRank
+	minRankPID     types.ProcessID
+	minRank        types.ProcessRank
 	epoch          int
 	leader         types.ProcessID
 	candidates     map[types.ProcessID]int
@@ -70,6 +72,7 @@ func NewLowerEpochElection(
 	e.fl = fl
 	e.stopCh = make(chan struct{})
 	e.logger = logger.NewNodeScopeLogger(self, logger.Scope{"election", "lee"})
+	//e.logger = zerolog.Nop()
 	e.once = types.NewWorkerOnce()
 
 	if runtime == nil {
@@ -116,7 +119,8 @@ func (e *LowerEpochElection) Subscribe(receiver Receiver) {
 
 func (e *LowerEpochElection) Recovery() {
 	e.mu.Lock()
-	e.leader = e.maxProcessesRank()
+	minPID, _ := e.minProcessesRank()
+	e.leader = minPID
 	e.sendLeader()
 	e.delay = e.delayDelta
 	e.retrieveEpoch()
@@ -133,15 +137,20 @@ func (e *LowerEpochElection) Recovery() {
 }
 
 func (e *LowerEpochElection) background(ctx context.Context) {
+	msg := HeartbeatMessage{
+		id:     uuid.New(),
+		from:   e.self,
+		epoch:  e.epoch,
+		sentAt: time.Now(),
+	}
+	e.sendEpochHeartbeat(msg)
+
 	timer := time.NewTimer(e.delay)
 	defer timer.Stop()
 
-	msg := HeartbeatMessage{
-		id:    uuid.New(),
-		from:  e.self,
-		epoch: e.epoch,
-	}
-	e.sendEpochHeartbeat(msg)
+	//selfMsg := fmt.Sprintf("pid%d", e.self)
+	//iter := 1
+	//fmt.Println("start timer", selfMsg, fmt.Sprintf("iter%d", iter), time.Now().UnixMilli())
 
 	for {
 		select {
@@ -151,6 +160,8 @@ func (e *LowerEpochElection) background(ctx context.Context) {
 		case <-timer.C:
 			e.tryElection()
 			timer.Reset(e.delay)
+			//iter++
+			//fmt.Println("start timer", selfMsg, fmt.Sprintf("iter%d", iter), time.Now().UnixMilli())
 		}
 	}
 }
@@ -179,16 +190,16 @@ func (e *LowerEpochElection) tryElection() {
 	if newLeader != e.leader {
 		e.delay += e.delayDelta
 		delayChanged = true
-		//oldLeader := e.leader
+		oldLeader := e.leader
 		e.leader = newLeader
 
-		//e.logger.Info().
-		//	Int("epoch", e.epoch).
-		//	Int("newLeader", int(e.leader)).
-		//	Int("oldLeader", int(oldLeader)).
-		//	Int64("curDelay", e.delay.Milliseconds()).
-		//	Int("count candidates", len(candidates)).
-		//	Msg("leader elected")
+		e.logger.Info().
+			Int("epoch", e.epoch).
+			Int("newLeader", int(e.leader)).
+			Int("oldLeader", int(oldLeader)).
+			Int64("curDelay", e.delay.Milliseconds()).
+			Int("count candidates", len(candidates)).
+			Msg("leader elected")
 
 		e.sendLeader()
 	}
@@ -206,9 +217,10 @@ func (e *LowerEpochElection) tryElection() {
 	}
 
 	msg := HeartbeatMessage{
-		id:    uuid.New(),
-		from:  e.self,
-		epoch: e.epoch,
+		id:     uuid.New(),
+		from:   e.self,
+		epoch:  e.epoch,
+		sentAt: time.Now(),
 	}
 	e.mu.Unlock()
 
@@ -217,21 +229,33 @@ func (e *LowerEpochElection) tryElection() {
 
 func (e *LowerEpochElection) selectMinEpochLeader(candidates map[types.ProcessID]int) (types.ProcessID, bool) {
 	if len(candidates) == 0 {
-		return e.maxProcessesRank(), true
+		return e.self, true
 	}
 
 	minEpoch := slices.Min(utils.ValuesSlice(candidates))
-	var minRank = types.ProcessRank(len(e.processes))
-	var minRankPID types.ProcessID
+	minEpochPIDs := make([]types.ProcessID, 0, len(candidates))
 	for pid, epoch := range candidates {
 		if epoch == minEpoch {
-			rank := e.processes[pid]
-			if rank <= minRank {
-				minRank = rank
-				minRankPID = pid
-			}
+			minEpochPIDs = append(minEpochPIDs, pid)
 		}
 	}
+
+	if len(minEpochPIDs) == 1 {
+		return minEpochPIDs[0], false
+	}
+
+	slices.Sort(minEpochPIDs)
+
+	first := minEpochPIDs[0]
+	minRankPID, minRank := first, e.processes[first]
+	for _, pid := range minEpochPIDs[1:] {
+		rank := e.processes[pid]
+		if rank <= minRank {
+			minRank = rank
+			minRankPID = pid
+		}
+	}
+
 	return minRankPID, false
 }
 
@@ -254,21 +278,6 @@ func (e *LowerEpochElection) retrieveEpoch() {
 	e.epoch = int(epoch)
 }
 
-func (e *LowerEpochElection) maxProcessesRank() types.ProcessID {
-	var (
-		maxRank types.ProcessRank = -1
-		maxPID  types.ProcessID
-	)
-	for pid, rank := range e.processes {
-		if maxRank <= rank {
-			maxRank = rank
-			maxPID = pid
-		}
-	}
-
-	return maxPID
-}
-
 func (e *LowerEpochElection) sendLeader() {
 	leader := e.leader
 	for _, receiver := range e.receivers {
@@ -288,24 +297,39 @@ func (e *LowerEpochElection) Deliver(msg types.Message) {
 		return
 	}
 
-	candidate := EpochCandidate{
-		Epoch:   hmsg.epoch,
-		Process: hmsg.from,
-	}
+	//e.logger.Info().Int64("sentTime", time.Now().Sub(hmsg.sentAt).Milliseconds()).Msg("heartbeat")
 
-	e.candidatesLock.Lock()
-	defer e.candidatesLock.Unlock()
-
-	curEpoch, ok := e.candidates[candidate.Process]
-	if ok && curEpoch >= candidate.Epoch {
-		return
-	}
-
-	e.candidates[candidate.Process] = candidate.Epoch
+	e.handleHeartbeat(hmsg)
 
 	//e.logger.Info().
 	//	Int("epoch", candidate.Epoch).
 	//	Int("process", int(candidate.Process)).
 	//	Int("count", len(e.candidates)).
 	//	Msg("candidate added")
+}
+
+func (e *LowerEpochElection) handleHeartbeat(msg HeartbeatMessage) {
+	e.candidatesLock.Lock()
+	defer e.candidatesLock.Unlock()
+
+	curEpoch, ok := e.candidates[msg.From()]
+	if ok && curEpoch >= msg.epoch {
+		return
+	}
+
+	e.candidates[msg.From()] = msg.epoch
+
+	//e.logger.Info().Int64("sentTime", time.Now().Sub(msg.sentAt).Milliseconds()).Msg("heartbeat")
+}
+
+func (e *LowerEpochElection) minProcessesRank() (types.ProcessID, types.ProcessRank) {
+	curRank := e.processes[e.self]
+	curPID := e.self
+	for pid, rank := range e.processes {
+		if rank <= curRank {
+			curPID = pid
+			curRank = rank
+		}
+	}
+	return curPID, curRank
 }

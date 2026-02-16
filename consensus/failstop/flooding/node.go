@@ -108,7 +108,7 @@ func (n *Node) AddNodes(nodes ...consensus.Consensus) {
 			continue
 		}
 		n.correct[node.ProcessID()] = node
-		n.broadcaster.AddCorrect(node)
+		n.broadcaster.AddCorrect(node.ProcessID())
 	}
 }
 

@@ -21,8 +21,8 @@ type AbortedState struct {
 }
 
 type State struct {
-	ts  int
-	val *types.Value
+	Ts  int
+	Val *types.Value
 }
 
 // epochConsensus is Read/Write Epoch Consensus instance
@@ -74,6 +74,10 @@ func newEpochConsensus(
 	return ec
 }
 
+func (ec *epochConsensus) Epoch() int {
+	return ec.epochTs
+}
+
 func (ec *epochConsensus) StartEpoch(
 	ctx context.Context,
 	leader types.ProcessID,
@@ -81,9 +85,6 @@ func (ec *epochConsensus) StartEpoch(
 	current State,
 ) {
 	ec.ctx, ec.cancel = context.WithCancel(ctx)
-
-	ec.beb.AddDeliverer(ec, types.DelivererWithMsgNames(ReadMsgName, WriteMsgName, DecideMsgName))
-	ec.pl.AddDeliverer(ec, types.DelivererWithMsgNames(StateMsgName, AcceptMsgName))
 
 	ec.logger = logger.NewNodeScopeLoggerFrom(ec.logger,
 		logger.Scope{"leader", leader.String()},
@@ -119,17 +120,29 @@ func (ec *epochConsensus) Abort() {
 func (ec *epochConsensus) abort() {
 	ec.cancel()
 	<-ec.stopCh
+
+	//ec.drainEvents()
+
 	aState := AbortedState{Ts: ec.epochTs, State: &ec.current}
 	ec.aborted <- aState
 	ec.logger.Warn().Any("state", aState.State).Msg("aborted")
 	ec.doCleanup()
 }
 
+func (ec *epochConsensus) decide(val types.Value) {
+	ec.stopOnce.Do(func() {
+		ec.decided <- val
+		ec.cancel()
+		go func() {
+			<-ec.stopCh
+			ec.doCleanup()
+		}()
+	})
+}
+
 func (ec *epochConsensus) doCleanup() {
 	close(ec.aborted)
 	close(ec.decided)
-	ec.pl.RemoveDeliverer(ec)
-	ec.beb.RemoveDeliverer(ec)
 }
 
 func (ec *epochConsensus) Aborted() <-chan AbortedState {
@@ -144,6 +157,18 @@ func (ec *epochConsensus) eventLoop() {
 			return
 		case evt := <-ec.evts:
 			ec.sm.Apply(evt)
+			//ec.logger.Info().Str("name", evt.Tag()).Str("smState", ec.sm.Current().String()).Msg("applied")
+		}
+	}
+}
+
+func (ec *epochConsensus) drainEvents() {
+	for {
+		select {
+		case evt := <-ec.evts:
+			ec.sm.Apply(evt)
+		default:
+			return
 		}
 	}
 }
@@ -166,7 +191,7 @@ func (ec *epochConsensus) onPropose(evt proposeEvent) types.State {
 	val := evt.val.Copy()
 	ec.tempValue = &val
 
-	msg := makeReadMsg(ec.self)
+	msg := makeReadMsg(ec.self, ec.epochTs)
 	ec.beb.Broadcast(ec.ctx, msg)
 
 	ec.logger.Info().Msg("start reading")
@@ -176,8 +201,8 @@ func (ec *epochConsensus) onPropose(evt proposeEvent) types.State {
 
 func (ec *epochConsensus) onReceivedRead(evt receivedReadEvent) types.State {
 	ec.receivedStates[evt.msg.From()] = State{
-		ts:  evt.msg.Ts,
-		val: evt.msg.Val,
+		Ts:  evt.msg.Ts,
+		Val: evt.msg.Val,
 	}
 
 	val := evt.msg.Val
@@ -203,14 +228,13 @@ func (ec *epochConsensus) onReceivedRead(evt receivedReadEvent) types.State {
 	}
 
 	highest := ec.highestState()
-	if highest.val != nil {
-		ec.tempValue = highest.val
+	if highest.Val != nil {
+		ec.tempValue = highest.Val
 	}
 
 	ec.receivedStates = make(map[types.ProcessID]State)
 
-	msg := makeWriteMsg(ec.self, ec.tempValue)
-
+	msg := makeWriteMsg(ec.self, ec.epochTs, ec.tempValue)
 	ec.beb.Broadcast(ec.ctx, msg)
 
 	ec.logger.Info().Any("val", ec.tempValue).Msg("start writing")
@@ -222,13 +246,14 @@ func (ec *epochConsensus) onReceivedAccept(evt receivedAcceptEvent) types.State 
 	ec.receivedAccepted++
 	ec.logger.Info().
 		Int("curAcceptCount", ec.receivedAccepted).
+		Str("from", evt.from.String()).
 		Msg("received accept")
 
 	if ec.receivedAccepted < ec.quorum() {
 		return StateWriting
 	}
 
-	msg := makeDecidedMsg(ec.self, *ec.tempValue)
+	msg := makeDecidedMsg(ec.self, ec.epochTs, *ec.tempValue)
 	ec.beb.Broadcast(ec.ctx, msg)
 
 	ec.logger.Info().Msg("start deciding")
@@ -237,28 +262,21 @@ func (ec *epochConsensus) onReceivedAccept(evt receivedAcceptEvent) types.State 
 }
 
 func (ec *epochConsensus) onDecided(evt decidedEvent) types.State {
-	ec.stopOnce.Do(func() {
-		ec.decided <- evt.val
-		ec.cancel()
-		go func() {
-			<-ec.stopCh
-			ec.doCleanup()
-		}()
-	})
+	ec.decide(evt.val)
 	return StateDecided
 }
 
 func (ec *epochConsensus) onHandleRead(evt handleReadEvent) types.State {
 	current := ec.current
-	msg := makeStateMsg(ec.self, current.ts, current.val)
+	msg := makeStateMsg(ec.self, current.Ts, current.Val)
 	ec.pl.Send(evt.from, msg)
 	return types.SameState
 }
 
 func (ec *epochConsensus) onHandleWrite(evt handleWriteEvent) types.State {
-	ec.current.ts = ec.epochTs
-	ec.current.val = evt.v
-	msg := makeAcceptMsg(ec.self)
+	ec.current.Ts = ec.epochTs
+	ec.current.Val = evt.v
+	msg := makeAcceptMsg(ec.self, ec.epochTs)
 	ec.pl.Send(evt.from, msg)
 	return types.SameState
 }
@@ -270,7 +288,7 @@ func (ec *epochConsensus) quorum() int {
 func (ec *epochConsensus) highestState() State {
 	var maxTsState State
 	for _, state := range ec.receivedStates {
-		if state.ts >= maxTsState.ts {
+		if state.Ts >= maxTsState.Ts {
 			maxTsState = state
 		}
 	}
@@ -286,7 +304,7 @@ func (ec *epochConsensus) Deliver(message types.Message) {
 	case StateMsg:
 		ec.handleState(msg)
 	case AcceptMsg:
-		ec.handleAccept()
+		ec.handleAccept(msg.From())
 	case ReadMsg:
 		ec.handleRead(msg.From())
 	case WriteMsg:
@@ -303,11 +321,11 @@ func (ec *epochConsensus) handleState(msg StateMsg) {
 	ec.apply(receivedReadEvent{msg: msg})
 }
 
-func (ec *epochConsensus) handleAccept() {
+func (ec *epochConsensus) handleAccept(from types.ProcessID) {
 	if ec.leader != ec.self {
 		return
 	}
-	ec.apply(receivedAcceptEvent{})
+	ec.apply(receivedAcceptEvent{from: from})
 }
 
 func (ec *epochConsensus) handleRead(from types.ProcessID) {
@@ -346,28 +364,32 @@ func makeStateMsg(from types.ProcessID, ts int, val *types.Value) StateMsg {
 	}
 }
 
-func makeAcceptMsg(from types.ProcessID) AcceptMsg {
+func makeAcceptMsg(from types.ProcessID, ts int) AcceptMsg {
 	return AcceptMsg{
 		Message: messages.NewBase(uuid.New(), from, AcceptMsgName),
+		Ts:      ts,
 	}
 }
 
-func makeDecidedMsg(from types.ProcessID, val types.Value) DecidedMsg {
+func makeDecidedMsg(from types.ProcessID, ts int, val types.Value) DecidedMsg {
 	return DecidedMsg{
 		Message: messages.NewBase(uuid.New(), from, DecideMsgName),
 		Val:     val,
+		Ts:      ts,
 	}
 }
 
-func makeReadMsg(from types.ProcessID) ReadMsg {
+func makeReadMsg(from types.ProcessID, ts int) ReadMsg {
 	return ReadMsg{
 		Message: messages.NewBase(uuid.New(), from, ReadMsgName),
+		Ts:      ts,
 	}
 }
 
-func makeWriteMsg(from types.ProcessID, val *types.Value) WriteMsg {
+func makeWriteMsg(from types.ProcessID, ts int, val *types.Value) WriteMsg {
 	return WriteMsg{
 		Message: messages.NewBase(uuid.New(), from, WriteMsgName),
 		Val:     val,
+		Ts:      ts,
 	}
 }
