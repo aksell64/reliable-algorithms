@@ -1,4 +1,4 @@
-package types
+package fsm
 
 type State string
 
@@ -31,14 +31,20 @@ func (sm *StateMachine) SetState(state State) {
 	sm.state = state
 }
 
-func (sm *StateMachine) addHandler(state State, evtTag string, h Handler) {
+func (sm *StateMachine) mustAddHandler(state State, evtTag string, h Handler) {
+	if evtTag == SameState.String() {
+		panic("cannot add same state")
+	}
 	if _, ok := sm.handlers[state]; !ok {
 		sm.handlers[state] = make(map[string]Handler)
 	}
 	sm.handlers[state][evtTag] = h
 }
 
-func (sm *StateMachine) addGlobalHandler(evtTag string, h Handler) {
+func (sm *StateMachine) mustAddGlobalHandler(evtTag string, h Handler) {
+	if evtTag == SameState.String() {
+		panic("cannot add same state")
+	}
 	sm.globalHandlers[evtTag] = h
 }
 
@@ -68,10 +74,10 @@ func (sm *StateMachine) Current() State {
 
 func AddSmHandler[T Event](sm *StateMachine, state State, evtTag string, h func(evt T) State) {
 	hh := func(evt Event) State { return h(evt.(T)) }
-	sm.addHandler(state, evtTag, hh)
+	sm.mustAddHandler(state, evtTag, hh)
 }
 
 func AddGlobalSmHandler[T Event](sm *StateMachine, evtTag string, h func(evt T) State) {
 	hh := func(evt Event) State { return h(evt.(T)) }
-	sm.addGlobalHandler(evtTag, hh)
+	sm.mustAddGlobalHandler(evtTag, hh)
 }

@@ -52,22 +52,7 @@ func (ud UnimplementedDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOpti
 func (ud UnimplementedDeliverer) RemoveDeliverer(d Deliverer)                       {}
 func (ud UnimplementedDeliverer) ID() uuid.UUID                                     { return ud.id }
 func (ud UnimplementedDeliverer) ProcessID() ProcessID                              { return ud.pid }
-
-func (ud UnimplementedDeliverer) Instance() string { return "unimplemented" }
-
-func mustAddDeliverers(src Deliverer, d Deliverer) Deliverer {
-	if src == nil && d == nil {
-		return nil
-	} else if src == nil {
-		return newMultyDeliverer(d.ProcessID(), d)
-	} else if d == nil {
-		return newMultyDeliverer(src.ProcessID(), src)
-	}
-	if src.ProcessID() == d.ProcessID() {
-		return newMultyDeliverer(src.ProcessID(), src, d)
-	}
-	panic("invalid deliverers ids")
-}
+func (ud UnimplementedDeliverer) Instance() string                                  { return "unimplemented" }
 
 type multyDeliverer struct {
 	UnimplementedDeliverer

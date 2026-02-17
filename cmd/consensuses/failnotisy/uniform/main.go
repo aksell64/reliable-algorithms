@@ -4,7 +4,7 @@ import (
 	"context"
 	"reliable/broadcaster"
 	"reliable/consensus"
-	"reliable/consensus/failnoticy/uniform"
+	"reliable/consensus/failnoisy/uniform"
 	"reliable/database/inmemory"
 	"reliable/election"
 	"reliable/p2p"
@@ -18,7 +18,7 @@ func main() {
 
 	ctx := context.Background()
 
-	correct := utils.ProcessesIDRange(1, 30)
+	correct := utils.ProcessesIDRange(1, 20)
 	processes := make(map[types.ProcessID]types.ProcessRank)
 	for _, pid := range correct {
 		processes[pid] = types.ProcessRank(pid)

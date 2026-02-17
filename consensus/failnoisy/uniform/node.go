@@ -260,48 +260,6 @@ func (n *Node) background() {
 				continue
 			}
 			n.newTs, n.newLeader = newEpoch.ts, newEpoch.leader
-			n.logger.Info().
-				Int("ts", newEpoch.ts).
-				Str("leader", newEpoch.leader.String()).Msg("new epoch")
-
-			// WORKAROUND: Handling new epoch transitions after consensus has already been decided.
-			//
-			// Problem:
-			// After a node has decided on a value, the epoch consensus instance (n.inner) is already
-			// stopped (via stopOnce). However, the epoch changer (LeaderBasedEpochChanger) continues
-			// to operate independently and may trigger new epoch transitions. When a new epoch arrives,
-			// the normal flow calls n.inner.Abort() to gracefully shut down the current epoch consensus
-			// and retrieve its latest state via the Aborted channel. But since the inner instance is
-			// already stopped, Abort() becomes a no-op — it never sends anything into the n.aborted
-			// channel. This causes the main background loop to deadlock: it waits for an AbortedState
-			// that will never arrive, so the node never transitions to the new epoch and gets stuck.
-			//
-			// Fix:
-			// When a new epoch arrives and the node has already decided, we bypass the dead inner
-			// instance entirely. Instead, we synthesize an AbortedState manually, carrying the already
-			// decided value as the current state, and push it into the n.aborted channel. This unblocks
-			// the main loop: the aborted handler fires, updates n.ets and n.leader, and starts a new
-			// epoch — which, while technically unnecessary, keeps the epoch changer protocol consistent
-			// and prevents the node from hanging.
-			//
-			// Why this is a workaround (not a clean solution):
-			// Ideally, after a node decides, it should stop the epoch changer entirely and ignore all
-			// subsequent newEpoch events — there is no reason to create new epoch consensus instances
-			// or process further rounds once the decision is final. A cleaner approach would be to
-			// either shut down the epoch changer upon decision, or simply `continue` here without
-			// synthesizing any AbortedState at all. The current approach keeps the node "alive" after
-			// decision, spawning new epoch consensus instances that do redundant work (reading, writing)
-			// for a value that has already been committed.
-			//
-			// Why it is still correct:
-			// Safety is preserved because the decided value is immutable — once n.decided is set to true,
-			// n.decidedVal never changes, and the decideCh channel is already closed. No subsequent epoch
-			// consensus instance can overwrite the decision: the decidedEnvsCh handler explicitly checks
-			// `if decided.ts != n.ets || n.decided { continue }`, so any new decide attempts are dropped.
-			// The synthesized AbortedState carries the decided value, so even if a new epoch starts, its
-			// initial state reflects the correct decision. Liveness is preserved because the node no longer
-			// blocks on a dead inner.Abort() — the synthetic abort unblocks the loop immediately.
-			// Verified empirically: with 30 nodes, all converge to the same decided value with no hangs.
 			if n.decided {
 				evt := AbortedState{
 					Ts: n.ets,
@@ -356,7 +314,9 @@ func (n *Node) startEpoch() {
 	}
 	n.inner.StartEpoch(n.ctx, n.leader, n.ets, state)
 
-	bufferedMsgs := n.inbox.bufferedAllEpoch()
+	bufferedMsgs := n.inbox.buffered(n.ets)
+	n.logger.Info().Any("buffered", bufferedMsgs).Int("epoch", n.ets).Msg("prepared")
+
 	for _, msg := range bufferedMsgs {
 		n.inner.Deliver(msg)
 	}
@@ -411,19 +371,19 @@ func (n *Node) Deliver(message types.Message) {
 func (n *Node) deliver(message types.Message) {
 	switch msg := message.(type) {
 	case StateMsg:
-		n.deliverInner(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Ts, msg)
 	case AcceptMsg:
-		n.deliverInner(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Epoch, msg)
 	case ReadMsg:
-		n.deliverInner(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Epoch, msg)
 	case WriteMsg:
-		n.deliverInner(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Epoch, msg)
 	case DecidedMsg:
-		n.deliverInner(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Epoch, msg)
 	}
 }
 
-func (n *Node) deliverInner(epoch int, msg types.Message) {
+func (n *Node) deliverOrPrepare(epoch int, msg types.Message) {
 	if n.inner == nil {
 		n.inbox.push(epoch, msg)
 		return

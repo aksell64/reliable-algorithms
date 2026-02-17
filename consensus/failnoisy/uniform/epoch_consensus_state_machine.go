@@ -2,16 +2,17 @@ package uniform
 
 import (
 	"reliable/types"
+	"reliable/types/fsm"
 )
 
 const (
-	StateIdle     types.State = "idle"
-	StatePropose  types.State = "propose"
-	StateReading  types.State = "reading"
-	StateWriting  types.State = "writing"
-	StateDeciding types.State = "deciding"
-	StateDecided  types.State = "decided"
-	StateAborted  types.State = "aborted"
+	StateIdle     fsm.State = "idle"
+	StatePropose  fsm.State = "propose"
+	StateReading  fsm.State = "reading"
+	StateWriting  fsm.State = "writing"
+	StateDeciding fsm.State = "deciding"
+	StateDecided  fsm.State = "decided"
+	StateAborted  fsm.State = "aborted"
 )
 
 type initEvent struct {
@@ -74,13 +75,13 @@ func (abortEvent) Tag() string          { return abortEventName }
 func (handleReadEvent) Tag() string     { return handleReadEventName }
 func (handleWriteEvent) Tag() string    { return handleWriteEventName }
 
-func initMachine(ec *epochConsensus, sm *types.StateMachine) {
-	types.AddSmHandler(sm, StateIdle, initEventName, ec.onInit)
-	types.AddSmHandler(sm, StatePropose, proposeEventName, ec.onPropose)
-	types.AddSmHandler(sm, StateReading, receivedReadEventName, ec.onReceivedRead)
-	types.AddSmHandler(sm, StateWriting, receivedAcceptEventName, ec.onReceivedAccept)
-	types.AddSmHandler(sm, StateDeciding, decidedEventName, ec.onDecided)
-	types.AddSmHandler(sm, StateIdle, decidedEventName, ec.onDecided)
-	types.AddGlobalSmHandler(sm, handleReadEventName, ec.onHandleRead)
-	types.AddGlobalSmHandler(sm, handleWriteEventName, ec.onHandleWrite)
+func initMachine(ec *epochConsensus, sm *fsm.StateMachine) {
+	fsm.AddSmHandler(sm, StateIdle, initEventName, ec.onInit)
+	fsm.AddSmHandler(sm, StatePropose, proposeEventName, ec.onPropose)
+	fsm.AddSmHandler(sm, StateReading, receivedReadEventName, ec.onReceivedRead)
+	fsm.AddSmHandler(sm, StateWriting, receivedAcceptEventName, ec.onReceivedAccept)
+	fsm.AddSmHandler(sm, StateDeciding, decidedEventName, ec.onDecided)
+	fsm.AddSmHandler(sm, StateIdle, decidedEventName, ec.onDecided)
+	fsm.AddGlobalSmHandler(sm, handleReadEventName, ec.onHandleRead)
+	fsm.AddGlobalSmHandler(sm, handleWriteEventName, ec.onHandleWrite)
 }

@@ -72,7 +72,7 @@ func NewLowerEpochElection(
 	e.fl = fl
 	e.stopCh = make(chan struct{})
 	e.logger = logger.NewNodeScopeLogger(self, logger.Scope{"election", "lee"})
-	//e.logger = zerolog.Nop()
+	e.logger = zerolog.Nop()
 	e.once = types.NewWorkerOnce()
 
 	if runtime == nil {
@@ -148,10 +148,6 @@ func (e *LowerEpochElection) background(ctx context.Context) {
 	timer := time.NewTimer(e.delay)
 	defer timer.Stop()
 
-	//selfMsg := fmt.Sprintf("pid%d", e.self)
-	//iter := 1
-	//fmt.Println("start timer", selfMsg, fmt.Sprintf("iter%d", iter), time.Now().UnixMilli())
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,8 +156,6 @@ func (e *LowerEpochElection) background(ctx context.Context) {
 		case <-timer.C:
 			e.tryElection()
 			timer.Reset(e.delay)
-			//iter++
-			//fmt.Println("start timer", selfMsg, fmt.Sprintf("iter%d", iter), time.Now().UnixMilli())
 		}
 	}
 }
@@ -210,10 +204,10 @@ func (e *LowerEpochElection) tryElection() {
 	}
 
 	if !delayChanged {
-		//e.logger.Info().
-		//	Int("count candidates", len(candidates)).
-		//	Str("leader", e.leader.String()).
-		//	Int64("delay", e.delay.Milliseconds()).Msg("no elected")
+		e.logger.Info().
+			Int("count candidates", len(candidates)).
+			Str("leader", e.leader.String()).
+			Int64("delay", e.delay.Milliseconds()).Msg("no elected")
 	}
 
 	msg := HeartbeatMessage{
@@ -297,15 +291,7 @@ func (e *LowerEpochElection) Deliver(msg types.Message) {
 		return
 	}
 
-	//e.logger.Info().Int64("sentTime", time.Now().Sub(hmsg.sentAt).Milliseconds()).Msg("heartbeat")
-
 	e.handleHeartbeat(hmsg)
-
-	//e.logger.Info().
-	//	Int("epoch", candidate.Epoch).
-	//	Int("process", int(candidate.Process)).
-	//	Int("count", len(e.candidates)).
-	//	Msg("candidate added")
 }
 
 func (e *LowerEpochElection) handleHeartbeat(msg HeartbeatMessage) {
@@ -318,8 +304,6 @@ func (e *LowerEpochElection) handleHeartbeat(msg HeartbeatMessage) {
 	}
 
 	e.candidates[msg.From()] = msg.epoch
-
-	//e.logger.Info().Int64("sentTime", time.Now().Sub(msg.sentAt).Milliseconds()).Msg("heartbeat")
 }
 
 func (e *LowerEpochElection) minProcessesRank() (types.ProcessID, types.ProcessRank) {

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"reliable/broadcaster"
-	"reliable/consensus/failnoticy/uniform"
+	"reliable/consensus/failnoisy/uniform"
 	"reliable/database/inmemory"
 	"reliable/election"
 	"reliable/p2p"

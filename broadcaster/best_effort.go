@@ -93,7 +93,6 @@ func (b *bestEffortBroadcaster) RemoveCorrect(id types.ProcessID) {
 }
 
 func (b *bestEffortBroadcaster) Deliver(msg types.Message) {
-	//b.logger.Info().Str("msg", msg.Name()).Str("from", msg.From().String()).Msg("delivering message")
 	b.Deliverer.Deliver(msg)
 }
 

@@ -12,28 +12,29 @@ const (
 
 type ReadMsg struct {
 	types.Message
-	Ts int
+	Epoch int
 }
 
 type StateMsg struct {
 	types.Message
-	Ts  int
-	Val *types.Value
+	Ts    int
+	Val   *types.Value
+	Epoch int
 }
 
 type WriteMsg struct {
 	types.Message
-	Val *types.Value
-	Ts  int
+	Val   *types.Value
+	Epoch int
 }
 
 type AcceptMsg struct {
 	types.Message
-	Ts int
+	Epoch int
 }
 
 type DecidedMsg struct {
 	types.Message
-	Val types.Value
-	Ts  int
+	Val   types.Value
+	Epoch int
 }
