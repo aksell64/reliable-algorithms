@@ -1,7 +1,6 @@
 package types
 
 import (
-	"fmt"
 	"strconv"
 	"sync"
 
@@ -37,11 +36,10 @@ func (r ProcessRank) Int() int {
 }
 
 type Value interface {
-	fmt.Stringer
-	Copy() Value
-
 	Compare(other Value) bool
 	Less(other Value) bool
+	String() string
+	Copy() Value
 }
 
 func IntValue(i int) Value {

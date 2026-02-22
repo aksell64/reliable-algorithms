@@ -157,15 +157,24 @@ type eagerReliableBroadcaster struct {
 func NewEagerReliableBroadcaster(
 	ctx context.Context,
 	self types.ProcessID,
+	processes []types.ProcessID,
 	beb Broadcaster,
 ) Broadcaster {
-	return &eagerReliableBroadcaster{
+	rb := &eagerReliableBroadcaster{
 		ctx:       ctx,
 		self:      self,
 		beb:       beb,
 		delivered: make(map[uuid.UUID]struct{}),
 		Deliverer: types.NewUnaryDeliverer(self),
+		once:      types.NewWorkerOnce(),
 	}
+
+	beb.AddDeliverer(rb)
+
+	for _, p := range processes {
+		rb.AddCorrect(p)
+	}
+	return rb
 }
 
 func (b *eagerReliableBroadcaster) Init() {
@@ -201,16 +210,21 @@ func (b *eagerReliableBroadcaster) Broadcast(ctx context.Context, msg types.Mess
 }
 
 func (b *eagerReliableBroadcaster) Deliver(msg types.Message) {
+	bmsg, ok := msg.(messages.ReliableBroadcastMessage)
+	if !ok {
+		return
+	}
+
 	b.mu.Lock()
-	if _, exists := b.delivered[msg.ID()]; exists {
+	if _, exists := b.delivered[bmsg.ID()]; exists {
 		b.mu.Unlock()
 		return
 	}
-	b.delivered[msg.ID()] = struct{}{}
+	b.delivered[bmsg.ID()] = struct{}{}
 	b.mu.Unlock()
 
-	b.Deliverer.Deliver(msg)
-	b.beb.Broadcast(b.ctx, msg)
+	b.Deliverer.Deliver(bmsg.Inner)
+	b.beb.Broadcast(b.ctx, bmsg)
 }
 
 func (b *eagerReliableBroadcaster) OnCrash(pid types.ProcessID) {}

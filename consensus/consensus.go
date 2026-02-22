@@ -5,6 +5,7 @@ import (
 	"reliable/logger"
 	"reliable/types"
 	"sync"
+	"sync/atomic"
 )
 
 type Consensus interface {
@@ -12,7 +13,6 @@ type Consensus interface {
 	Propose(v types.Value)
 	Decided() <-chan types.Value
 	Crashed() chan struct{}
-	AddNodes(nodes ...Consensus)
 }
 
 type DeterministicSelector interface {
@@ -53,6 +53,7 @@ func PrintDecided(vals []Decided) {
 func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 	results := make(chan Decided, len(nodes))
 	wg := sync.WaitGroup{}
+	count := atomic.Int32{}
 	wg.Add(len(nodes))
 	for _, node := range nodes {
 		go func() {
@@ -69,6 +70,7 @@ func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 					Value:     v,
 				}
 				results <- decided
+				count.Add(1)
 			}
 		}()
 	}
@@ -81,4 +83,18 @@ func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 		result = append(result, decided)
 	}
 	return result
+}
+
+func MustUniqAgreement(decided []Decided) []Decided {
+	if len(decided) == 0 {
+		return decided
+	}
+
+	val := decided[0].Value
+	for _, d := range decided {
+		if val != d.Value {
+			panic("Unique Agreement violation")
+		}
+	}
+	return decided
 }

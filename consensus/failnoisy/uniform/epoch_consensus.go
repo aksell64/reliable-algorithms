@@ -8,7 +8,6 @@ import (
 	"reliable/p2p"
 	"reliable/types"
 	"reliable/types/fsm"
-	"reliable/utils"
 	"strconv"
 	"sync"
 
@@ -101,17 +100,15 @@ func (ec *epochConsensus) StartEpoch(
 
 	go ec.eventLoop()
 
-	ec.apply(initEvent{
+	ec.triggerApply(initEvent{
 		epochTs: epoch,
 		leader:  leader,
 		current: current,
 	})
-
-	ec.logger.Info().Any("state", current).Msg("epoch started")
 }
 
 func (ec *epochConsensus) Propose(v types.Value) {
-	ec.apply(proposeEvent{val: v})
+	ec.triggerApply(proposeEvent{val: v})
 }
 
 func (ec *epochConsensus) Abort() {
@@ -122,11 +119,9 @@ func (ec *epochConsensus) abort() {
 	ec.cancel()
 	<-ec.stopCh
 
-	//ec.drainEvents()
-
+	ec.drainEvents()
 	aState := AbortedState{Ts: ec.epochTs, State: &ec.current}
 	ec.aborted <- aState
-	ec.logger.Warn().Any("state", aState.State).Msg("aborted")
 	ec.doCleanup()
 }
 
@@ -134,10 +129,8 @@ func (ec *epochConsensus) decide(val types.Value) {
 	ec.stopOnce.Do(func() {
 		ec.decided <- val
 		ec.cancel()
-		go func() {
-			<-ec.stopCh
-			ec.doCleanup()
-		}()
+		<-ec.stopCh
+		ec.doCleanup()
 	})
 }
 
@@ -158,7 +151,6 @@ func (ec *epochConsensus) eventLoop() {
 			return
 		case evt := <-ec.evts:
 			ec.sm.Apply(evt)
-			//ec.logger.Info().Str("name", evt.Tag()).Str("smState", ec.sm.Current().String()).Msg("applied")
 		}
 	}
 }
@@ -178,6 +170,7 @@ func (ec *epochConsensus) onInit(evt initEvent) fsm.State {
 	ec.epochTs = evt.epochTs
 	ec.leader = evt.leader
 	ec.current = evt.current
+	ec.logger.Info().Any("state", ec.current).Msg("epoch started")
 	if ec.leader == ec.self {
 		return StatePropose
 	}
@@ -207,22 +200,12 @@ func (ec *epochConsensus) onReceivedRead(evt receivedReadEvent) fsm.State {
 	}
 
 	val := evt.msg.Val
-	if val != nil {
-		v := *val
-		ec.logger.Info().
-			Int("ts", evt.msg.Ts).
-			Str("val", v.String()).
-			Str("from", evt.msg.From().String()).
-			Any("received", utils.KeysSlice(ec.receivedStates)).
-			Msg("received read")
-	} else {
-		ec.logger.Info().
-			Int("ts", evt.msg.Ts).
-			Str("val", "empty").
-			Str("from", evt.msg.From().String()).
-			Any("received", utils.KeysSlice(ec.receivedStates)).
-			Msg("received read")
-	}
+	ec.logger.Info().
+		Int("ts", evt.msg.Ts).
+		Any("val", val).
+		Str("from", evt.msg.From().String()).
+		Any("receivedCount", len(ec.receivedStates)).
+		Msg("received read")
 
 	if len(ec.receivedStates) < ec.quorum() {
 		return StateReading
@@ -270,6 +253,7 @@ func (ec *epochConsensus) onDecided(evt decidedEvent) fsm.State {
 func (ec *epochConsensus) onHandleRead(evt handleReadEvent) fsm.State {
 	current := ec.current
 	msg := makeStateMsg(ec.self, current.Ts, current.Val, ec.epochTs)
+	ec.logger.Info().Any("state", ec.current).Str("to", evt.from.String()).Msg("send read")
 	ec.pl.Send(evt.from, msg)
 	return fsm.SameState
 }
@@ -277,6 +261,7 @@ func (ec *epochConsensus) onHandleRead(evt handleReadEvent) fsm.State {
 func (ec *epochConsensus) onHandleWrite(evt handleWriteEvent) fsm.State {
 	ec.current.Ts = ec.epochTs
 	ec.current.Val = evt.v
+	ec.logger.Info().Any("val", evt.v).Str("from", evt.from.String()).Msg("written")
 	msg := makeAcceptMsg(ec.self, ec.epochTs)
 	ec.pl.Send(evt.from, msg)
 	return fsm.SameState
@@ -319,38 +304,38 @@ func (ec *epochConsensus) handleState(msg StateMsg) {
 	if ec.leader != ec.self || ec.epochTs != msg.Epoch {
 		return
 	}
-	ec.apply(receivedReadEvent{msg: msg})
+	ec.triggerApply(receivedReadEvent{msg: msg})
 }
 
 func (ec *epochConsensus) handleAccept(from types.ProcessID, epoch int) {
 	if ec.leader != ec.self || ec.epochTs != epoch {
 		return
 	}
-	ec.apply(receivedAcceptEvent{from: from})
+	ec.triggerApply(receivedAcceptEvent{from: from})
 }
 
 func (ec *epochConsensus) handleRead(from types.ProcessID, epoch int) {
 	if ec.leader != from || ec.epochTs != epoch {
 		return
 	}
-	ec.apply(handleReadEvent{from: from})
+	ec.triggerApply(handleReadEvent{from: from})
 }
 
 func (ec *epochConsensus) handleWrite(from types.ProcessID, val *types.Value, epoch int) {
 	if ec.leader != from || ec.epochTs != epoch {
 		return
 	}
-	ec.apply(handleWriteEvent{from: from, v: val})
+	ec.triggerApply(handleWriteEvent{from: from, v: val})
 }
 
 func (ec *epochConsensus) handleDecide(from types.ProcessID, v types.Value, epoch int) {
 	if ec.leader != from || ec.epochTs != epoch {
 		return
 	}
-	ec.apply(decidedEvent{val: v})
+	ec.triggerApply(decidedEvent{val: v})
 }
 
-func (ec *epochConsensus) apply(evt fsm.Event) {
+func (ec *epochConsensus) triggerApply(evt fsm.Event) {
 	select {
 	case <-ec.ctx.Done():
 	case ec.evts <- evt:

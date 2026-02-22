@@ -3,7 +3,6 @@ package uniform
 import (
 	"context"
 	"reliable/broadcaster"
-	"reliable/consensus"
 	"reliable/logger"
 	"reliable/p2p"
 	"reliable/types"
@@ -16,6 +15,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const (
+	epochDeadlockCheckInterval = 30 * time.Second
+	proposeInterval            = 100 * time.Millisecond
+)
+
 type newEpochEnvelope struct {
 	ts     int
 	leader types.ProcessID
@@ -24,6 +28,11 @@ type newEpochEnvelope struct {
 type decideEnvelope struct {
 	ts  int
 	val types.Value
+}
+
+type abortedEnvelope struct {
+	force bool
+	state AbortedState
 }
 
 type EpochConsensus interface {
@@ -70,7 +79,7 @@ type Node struct {
 	decideCh       chan types.Value
 	decided        bool
 	decidedVal     types.Value
-	aborted        chan AbortedState
+	aborted        chan abortedEnvelope
 	state          *State
 	newEpochCh     chan newEpochEnvelope
 	inbox          *msgsInbox
@@ -102,7 +111,7 @@ func New(
 	n.newEpochCh = make(chan newEpochEnvelope, 50)
 	n.decidedEnvsCh = make(chan decideEnvelope, 1)
 	n.decideCh = make(chan types.Value, 1)
-	n.aborted = make(chan AbortedState, 1)
+	n.aborted = make(chan abortedEnvelope, 1)
 	n.stopCh = make(chan struct{})
 	n.once = types.NewWorkerOnce()
 	n.logger = logger.NewNodeScopeLogger(self, logger.Scope{"consensus", "uni"})
@@ -162,8 +171,6 @@ func (n *Node) stopOnce() {
 	})
 }
 
-func (n *Node) AddNodes(nodes ...consensus.Consensus) {}
-
 func (n *Node) Propose(v types.Value) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -205,9 +212,12 @@ func (n *Node) triggerNewEpoch(ts int, leader types.ProcessID) {
 
 func (n *Node) background() {
 	defer n.stopOnce()
-	proposeTimer := time.NewTimer(200 * time.Millisecond)
+	proposeTimer := time.NewTimer(proposeInterval)
 	defer proposeTimer.Stop()
 	var proposeChecked bool
+
+	epochLogTicker := time.NewTicker(20 * time.Second)
+	defer epochLogTicker.Stop()
 
 	for {
 		proposeChecked = false
@@ -215,9 +225,12 @@ func (n *Node) background() {
 		case <-n.ctx.Done():
 			return
 
+		case <-epochLogTicker.C:
+			n.logger.Info().Int("ets", n.ets).Msg("epoch log")
+
 		case <-proposeTimer.C:
 			n.maybePropose()
-			proposeTimer.Reset(100 * time.Millisecond)
+			proposeTimer.Reset(proposeInterval)
 			proposeChecked = true
 
 		case msg := <-n.msgsCh:
@@ -227,6 +240,7 @@ func (n *Node) background() {
 			if decided.ts != n.ets || n.decided {
 				continue
 			}
+
 			n.logger.Info().
 				Str("val", decided.val.String()).
 				Int("ts", decided.ts).Msg("decided")
@@ -236,17 +250,19 @@ func (n *Node) background() {
 			n.decided = true
 			n.decidedVal = decided.val
 
-		case abortState := <-n.aborted:
+		case abortedEnv := <-n.aborted:
+			abortState := abortedEnv.state
 			if abortState.Ts != n.ets {
 				n.inbox.clear(abortState.Ts)
 				continue
 			}
 
 			n.logger.Warn().
-				Int("ts", abortState.Ts).
+				Int("stateEts", abortState.Ts).
 				Any("stateTs", abortState.State.Ts).
 				Any("stateVal", abortState.State.Val).
-				Msg("aborted state")
+				Bool("force", abortedEnv.force).
+				Msg("aborted")
 
 			n.state = abortState.State
 			n.ets = n.newTs
@@ -259,6 +275,7 @@ func (n *Node) background() {
 			if newEpoch.ts <= n.ets {
 				continue
 			}
+
 			n.newTs, n.newLeader = newEpoch.ts, newEpoch.leader
 			if n.decided {
 				evt := AbortedState{
@@ -286,9 +303,13 @@ func (n *Node) background() {
 }
 
 func (n *Node) triggerAborted(state AbortedState) {
+	env := abortedEnvelope{
+		state: state,
+		force: true,
+	}
 	select {
 	case <-n.ctx.Done():
-	case n.aborted <- state:
+	case n.aborted <- env:
 	}
 }
 
@@ -299,7 +320,7 @@ func (n *Node) maybePropose() {
 		val := *n.val
 		n.mu.Unlock()
 		n.inner.Propose(val)
-		n.logger.Info().Str("val", val.String()).Msg("proposed")
+		n.logger.Info().Int("ets", n.ets).Str("val", val.String()).Msg("proposed")
 		return
 	}
 	n.mu.Unlock()
@@ -315,7 +336,6 @@ func (n *Node) startEpoch() {
 	n.inner.StartEpoch(n.ctx, n.leader, n.ets, state)
 
 	bufferedMsgs := n.inbox.buffered(n.ets)
-	n.logger.Info().Any("buffered", bufferedMsgs).Int("epoch", n.ets).Msg("prepared")
 
 	for _, msg := range bufferedMsgs {
 		n.inner.Deliver(msg)
@@ -342,7 +362,7 @@ func (n *Node) waitFinishEpoch(inner EpochConsensus) {
 			}
 			select {
 			case <-n.ctx.Done():
-			case n.aborted <- aborted:
+			case n.aborted <- abortedEnvelope{state: aborted}:
 			}
 		case decided, ok := <-decidedCh:
 			if !ok {
@@ -371,7 +391,7 @@ func (n *Node) Deliver(message types.Message) {
 func (n *Node) deliver(message types.Message) {
 	switch msg := message.(type) {
 	case StateMsg:
-		n.deliverOrPrepare(msg.Ts, msg)
+		n.deliverOrPrepare(msg.Epoch, msg)
 	case AcceptMsg:
 		n.deliverOrPrepare(msg.Epoch, msg)
 	case ReadMsg:

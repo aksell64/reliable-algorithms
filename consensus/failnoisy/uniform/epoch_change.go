@@ -18,21 +18,13 @@ import (
 )
 
 const (
-	NewEpochMsgName = "new_epoch"
-	NAckMsgName     = "nack"
+	NewEpochMsgName  = "new_epoch"
+	NAckMsgName      = "nack"
+	SubscribeMsgName = "subscribe"
 
-	bcastNewEpochDebounceInterval    = 300 * time.Millisecond
+	bcastNewEpochDebounceInterval    = 100 * time.Millisecond
 	bcastNewEpochMaxDebounceInterval = bcastNewEpochDebounceInterval * 4
 )
-
-type NewEpochMsg struct {
-	types.Message
-	Ts int
-}
-
-type NAckMsg struct {
-	types.Message
-}
 
 type EpochStarter interface {
 	StartEpoch(ts int, leader types.ProcessID)
@@ -79,12 +71,22 @@ func NewLeaderBasedEpochChanger(
 	ec.bcastNewEpochCh = make(chan NewEpochMsg, ec.processesCount)
 
 	ec.beb.AddDeliverer(ec, types.DelivererWithMsgNames(NewEpochMsgName))
-	ec.pl.AddDeliverer(ec, types.DelivererWithMsgNames(NAckMsgName))
+
+	ec.pl.AddDeliverer(ec, types.DelivererWithMsgNames(
+		NAckMsgName,
+
+		// SubscribeMsgName must be registered alongside NAckMsgName on the
+		// point-to-point link deliverer. Subscribe messages are sent directly
+		// from a follower to the leader (not broadcast), so they arrive via pl.
+		// If this name is not registered here, the message silently vanishes
+		// and the leader never learns about the follower's current state —
+		// falling back to the slow NAck-based catch-up path.
+		SubscribeMsgName))
 
 	ec.runtime = types.NewRuntimeProcessor(ctx, runtime, ec)
 	ec.once = types.NewWorkerOnce()
 	ec.logger = logger.NewNodeScopeLogger(self, logger.Scope{"epoch_changer", "leader_based"})
-
+	ec.logger = zerolog.Nop()
 	return ec
 }
 
@@ -191,22 +193,47 @@ func (ec *LeaderBasedEpochChanger) triggerBroadcastNewEpoch(msg NewEpochMsg) {
 	}
 }
 
-func (ec *LeaderBasedEpochChanger) OnNewLeader(leader types.ProcessID) {
+func (ec *LeaderBasedEpochChanger) incTs() {
+	ec.ts += ec.processesCount
+}
+
+func (ec *LeaderBasedEpochChanger) NewEpoch() {
 	ec.mu.Lock()
-	//ec.logger.Info().Str("leader", leader.String()).Msg("new leader")
-	ec.trusted = leader
 	if ec.trusted != ec.self {
 		ec.mu.Unlock()
 		return
 	}
 
-	ec.ts += ec.processesCount
+	ec.incTs()
 	ec.logger.Info().Int("ts", ec.ts).Msg("make epoch")
 
-	msg := NewEpochMsg{
-		Ts:      ec.ts,
-		Message: messages.NewBase(uuid.New(), ec.self, "new_epoch"),
+	msg := ec.makeNewEpochMsg()
+	ec.mu.Unlock()
+
+	ec.triggerBroadcastNewEpoch(msg)
+}
+
+func (ec *LeaderBasedEpochChanger) OnNewLeader(leader types.ProcessID) {
+	ec.mu.Lock()
+	ec.trusted = leader
+	if ec.trusted != ec.self {
+		// When a new leader is elected and we are NOT that leader, we send a
+		// SubscribeMsg carrying our lastTs (the highest epoch timestamp we have
+		// accepted so far). This lets the new leader know where we left off, so
+		// it can skip ahead past any epochs we've already seen. This avoids a
+		// scenario where the leader starts from a low timestamp, gets NAck'd by
+		// every follower, and has to increment one-by-one — potentially causing
+		// a NAck storm before convergence.
+		msg := ec.makeSubscribeMsg()
+		ec.mu.Unlock()
+		ec.pl.Send(leader, msg)
+		return
 	}
+
+	ec.incTs()
+	ec.logger.Info().Int("ts", ec.ts).Msg("make epoch")
+
+	msg := ec.makeNewEpochMsg()
 	ec.mu.Unlock()
 
 	ec.triggerBroadcastNewEpoch(msg)
@@ -233,19 +260,9 @@ func (ec *LeaderBasedEpochChanger) handleNewEpoch(leader types.ProcessID, ts int
 			Msg("new leader epoch")
 		return
 	}
-
-	//ec.logger.Info().
-	//	Int("ts", ts).
-	//	Int("curLastTs", ec.lastTs).
-	//	Str("leader", leader.String()).
-	//	Str("curLeader", ec.trusted.String()).
-	//	Msg("incorrect leader epoch")
-
 	ec.mu.Unlock()
 
-	msg := NAckMsg{
-		Message: messages.NewBase(uuid.New(), ec.self, NAckMsgName),
-	}
+	msg := ec.makeNackMsg()
 	ec.pl.Send(leader, msg)
 }
 
@@ -256,13 +273,34 @@ func (ec *LeaderBasedEpochChanger) handleNAck() {
 		return
 	}
 
-	ec.ts += ec.processesCount
-	//ec.logger.Info().Int("ts", ec.ts).Msg("make nack epoch")
+	ec.incTs()
+	msg := ec.makeNewEpochMsg()
+	ec.mu.Unlock()
 
-	msg := NewEpochMsg{
-		Ts:      ec.ts,
-		Message: messages.NewBase(uuid.New(), ec.self, NewEpochMsgName),
+	ec.triggerBroadcastNewEpoch(msg)
+}
+
+// handleSubscribe is invoked when a follower notifies the current leader about
+// the highest epoch timestamp it has already accepted. This serves as a
+// catch-up mechanism: if the leader's current timestamp is not ahead of the
+// follower's, the leader fast-forwards its own timestamp by incrementing in
+// steps of processesCount (to preserve rank-based partitioning) until it
+// strictly exceeds the follower's value. A new epoch is then broadcast so that
+// all processes (including the lagging follower) can converge on the same
+// epoch. Without this, a newly elected leader could propose an epoch that
+// followers have already seen, resulting in an infinite NAck loop.
+func (ec *LeaderBasedEpochChanger) handleSubscribe(otherTs int) {
+	ec.mu.Lock()
+	if ec.trusted != ec.self || ec.ts > otherTs {
+		ec.mu.Unlock()
+		return
 	}
+
+	for ec.ts <= otherTs {
+		ec.incTs()
+	}
+
+	msg := ec.makeNewEpochMsg()
 	ec.mu.Unlock()
 
 	ec.triggerBroadcastNewEpoch(msg)
@@ -274,5 +312,52 @@ func (ec *LeaderBasedEpochChanger) Deliver(msg types.Message) {
 		ec.handleNewEpoch(m.From(), m.Ts)
 	case NAckMsg:
 		ec.handleNAck()
+	case SubscribeMsg:
+		ec.handleSubscribe(m.CurrentTs)
+	}
+}
+
+type (
+	NewEpochMsg struct {
+		types.Message
+		Ts int
+	}
+
+	NAckMsg struct {
+		types.Message
+	}
+
+	SubscribeMsg struct {
+		types.Message
+		CurrentTs int
+	}
+)
+
+func (ec *LeaderBasedEpochChanger) makeSubscribeMsg() SubscribeMsg {
+	return SubscribeMsg{
+		Message: messages.NewBase(uuid.New(), ec.self, SubscribeMsgName),
+
+		// We intentionally send lastTs (the timestamp of the last accepted epoch)
+		// rather than ts (our own internal proposal counter). The leader needs to
+		// know which epoch the follower has *accepted*, not the follower's private
+		// counter, because the leader must propose an epoch strictly greater than
+		// what the follower has already committed to. Using ts here would be
+		// incorrect — ts reflects how many times *we* incremented our own counter
+		// (e.g. via NAcks when we were a leader ourselves) and has no relation to
+		// what we've actually accepted.
+		CurrentTs: ec.lastTs,
+	}
+}
+
+func (ec *LeaderBasedEpochChanger) makeNewEpochMsg() NewEpochMsg {
+	return NewEpochMsg{
+		Ts:      ec.ts,
+		Message: messages.NewBase(uuid.New(), ec.self, NewEpochMsgName),
+	}
+}
+
+func (ec *LeaderBasedEpochChanger) makeNackMsg() NAckMsg {
+	return NAckMsg{
+		Message: messages.NewBase(uuid.New(), ec.self, NAckMsgName),
 	}
 }

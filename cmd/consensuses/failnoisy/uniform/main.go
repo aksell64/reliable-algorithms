@@ -18,7 +18,7 @@ func main() {
 
 	ctx := context.Background()
 
-	correct := utils.ProcessesIDRange(1, 20)
+	correct := utils.ProcessesIDRange(1, 40)
 	processes := make(map[types.ProcessID]types.ProcessRank)
 	for _, pid := range correct {
 		processes[pid] = types.ProcessRank(pid)
@@ -28,10 +28,6 @@ func main() {
 
 	for _, pid := range correct {
 		nodes = append(nodes, makeConsensus(ctx, processes, pid))
-	}
-
-	for _, node := range nodes {
-		node.AddNodes(nodes...)
 	}
 
 	for _, node := range nodes {
@@ -47,7 +43,7 @@ func main() {
 		go node.Propose(types.IntValue(value))
 	}
 
-	consensus.PrintDecided(consensus.CollectDecided(ctx, nodes...))
+	consensus.PrintDecided(consensus.MustUniqAgreement(consensus.CollectDecided(ctx, nodes...)))
 }
 
 func makeConsensus(
@@ -63,7 +59,7 @@ func makeConsensus(
 		broadcaster.DefaultBroadcastNodeSelector(),
 		pl)
 	store := inmemory.NewKVStore()
-	elect := election.NewLowerEpochElection(ctx, pid, processes, store, fl, 100*time.Millisecond, nil)
+	elect := election.NewLowerEpochElection(ctx, pid, processes, store, fl, 300*time.Millisecond, nil)
 	ec := uniform.NewLeaderBasedEpochChanger(ctx, pid, processes, beb, elect, pl, nil)
 	node := uniform.New(ctx, pid, processes, ec, pl, beb)
 	return node
