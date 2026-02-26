@@ -7,6 +7,7 @@ import (
 )
 
 type HeartbeatRequestMessage struct {
+	types.Message
 	id   uuid.UUID
 	from types.ProcessID
 }
@@ -24,6 +25,7 @@ func (msg HeartbeatRequestMessage) From() types.ProcessID {
 }
 
 type HeartbeatResponseMessage struct {
+	types.Message
 	id    uuid.UUID
 	reqId uuid.UUID
 	from  types.ProcessID

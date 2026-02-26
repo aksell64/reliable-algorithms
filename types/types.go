@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"strconv"
 	"sync"
 
@@ -36,47 +37,64 @@ func (r ProcessRank) Int() int {
 }
 
 type Value interface {
+	Type() string
 	Compare(other Value) bool
 	Less(other Value) bool
 	String() string
+	Bytes() ([]byte, error)
 	Copy() Value
 }
 
 func IntValue(i int) Value {
-	return intValue(i)
+	v := intValue(i)
+	return &v
 }
 
 type intValue int
 
-func (v intValue) String() string {
-	return strconv.Itoa(int(v))
+func (v *intValue) Type() string {
+	return "intValue"
 }
 
-func (v intValue) Copy() Value {
-	return intValue(v)
+func (v *intValue) String() string {
+	return strconv.Itoa(int(*v))
 }
 
-func (v intValue) Compare(other Value) bool {
-	ov, ok := other.(intValue)
+func (v *intValue) Copy() Value {
+	vv := *v
+	return &vv
+}
+
+func (v *intValue) Compare(other Value) bool {
+	ov, ok := other.(*intValue)
 	if !ok {
 		return false
 	}
 	return v == ov
 }
 
-func (v intValue) Less(other Value) bool {
-	ov, ok := other.(intValue)
+func (v *intValue) Less(other Value) bool {
+	ov, ok := other.(*intValue)
 	if !ok {
 		return false
 	}
 
-	return v < ov
+	return *v < *ov
+}
+
+func (v *intValue) Bytes() ([]byte, error) {
+	return json.Marshal(*v)
+}
+
+func (v *intValue) FromBytes(data []byte) error {
+	return json.Unmarshal(data, v)
 }
 
 type Message interface {
 	ID() uuid.UUID
 	Name() string
 	From() ProcessID
+	Type() string
 }
 
 type Crasher interface {
@@ -139,20 +157,4 @@ func (w *WorkerOnce) Start(f func()) {
 
 func (w *WorkerOnce) Stop(f func()) {
 	w.stopOnce.Do(f)
-}
-
-type NamedEvt struct {
-	name string
-}
-
-func NamedWithScopes(name string, scopes ...string) NamedEvt {
-	n := name
-	for _, scope := range scopes {
-		n += "_" + scope
-	}
-	return NamedEvt{n}
-}
-
-func (evt NamedEvt) Name() string {
-	return evt.name
 }

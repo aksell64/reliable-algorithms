@@ -106,7 +106,7 @@ func (n *Node) Stop() {
 
 func (n *Node) AddNodes(nodes ...consensus.Consensus) {
 	for _, node := range nodes {
-		n.broadcaster.AddCorrect(node)
+		n.broadcaster.AddCorrect(node.ProcessID())
 		rank := types.ProcessRank(node.ProcessID())
 		n.processesRanks[node.ProcessID()] = rank
 	}

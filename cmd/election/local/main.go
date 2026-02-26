@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"reliable/database/inmemory"
+	"reliable/database"
 	"reliable/election"
 	"reliable/p2p"
 	"reliable/types"
@@ -45,9 +45,9 @@ func makeElection(
 	self types.ProcessID) *election.LowerEpochElection {
 
 	baseLink := p2p.NewBaseLink(self /*p2p.WithDeliverSleep(400*time.Millisecond, time.Second)*/)
-	storage := inmemory.NewKVStore()
+	storage := database.NewInMemory()
 
-	e := election.NewLowerEpochElection(ctx, self, processes, storage, baseLink, 5*time.Second, nil)
+	e := election.NewLowerEpochElection(ctx, self, processes, storage, baseLink, 50*time.Millisecond, nil)
 	return e
 }
 
@@ -58,7 +58,7 @@ func makeFailureElection(
 ) *election.LowerEpochElection {
 
 	baseLink := p2p.NewBaseLink(self, p2p.WithDeliverSleep(2*time.Second, 3*time.Second))
-	storage := inmemory.NewKVStore()
+	storage := database.NewInMemory()
 
 	rt := types.NewRuntime()
 

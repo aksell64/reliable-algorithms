@@ -6,6 +6,11 @@ import (
 	"sync"
 )
 
+const (
+	bufReadersCount = 32
+	bufSize         = 4048
+)
+
 type inMemNetwork struct {
 	conns      map[types.ProcessID]map[types.ProcessID]*conn
 	deliverers map[types.ProcessID]types.Deliverer
@@ -25,11 +30,14 @@ func NewInMemory() Network {
 	}
 }
 
+func (net *inMemNetwork) Boostrap() error { return nil }
+
 func (net *inMemNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	c := net.getOrCreateConn(from, to)
 	select {
 	case c.buf <- msg:
 	default:
+		// cringe optimization
 		c.buf <- msg
 	}
 }
@@ -64,7 +72,6 @@ func (net *inMemNetwork) getOrCreateConn(from, to types.ProcessID) *conn {
 	deliverer, ok := net.deliverers[to]
 	if !ok {
 		logger.Panicfmt("not connected")
-		return c
 	}
 
 	for range bufReadersCount {

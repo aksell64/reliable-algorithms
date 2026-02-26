@@ -27,10 +27,6 @@ func main() {
 	}
 
 	for _, node := range nodes {
-		node.AddNodes(nodes...)
-	}
-
-	for _, node := range nodes {
 		node.Init()
 	}
 

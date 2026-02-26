@@ -68,6 +68,7 @@ func (msg CrashMessage) From() types.ProcessID {
 }
 
 type ReliableBroadcastMessage struct {
+	types.Message
 	Id     uuid.UUID
 	Inner  types.Message
 	Sender types.ProcessID
@@ -90,26 +91,27 @@ type Ack struct {
 }
 
 type BaseMsg struct {
-	id   uuid.UUID
-	from types.ProcessID
-	name string
+	Id      uuid.UUID
+	FromPID types.ProcessID
+	MsgName string
 }
 
 func (msg BaseMsg) ID() uuid.UUID {
-	return msg.id
+	return msg.Id
 }
 func (msg BaseMsg) Name() string {
-	return msg.name
+	return msg.MsgName
 }
 
 func (msg BaseMsg) From() types.ProcessID {
-	return msg.from
+	return msg.FromPID
 }
+func (msg BaseMsg) Type() string { return msg.Name() }
 
-func NewBase(id uuid.UUID, from types.ProcessID, name string) types.Message {
+func NewBase(id uuid.UUID, from types.ProcessID, name string) BaseMsg {
 	return BaseMsg{
-		id:   id,
-		from: from,
-		name: name,
+		Id:      id,
+		FromPID: from,
+		MsgName: name,
 	}
 }

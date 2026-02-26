@@ -23,8 +23,7 @@ const (
 	phase2    = "phase2"
 )
 
-type CoinFactory func(domain ...types.Value) coin.CommonCoin
-
+// Node is Randomized Consensus with Large Domain instance
 type Node struct {
 	types.Deliverer
 	ctx                  context.Context
@@ -41,7 +40,7 @@ type Node struct {
 	processesCount       int
 	crashFaults          int
 	decided              chan types.Value
-	coinFactory          CoinFactory
+	coin                 coin.TsCoinScheme
 	pendingPhase         []phaseEvt
 	drainPendingInterval time.Duration
 	beb                  broadcaster.Broadcaster
@@ -58,7 +57,7 @@ func New(
 	processes []types.ProcessID,
 	self types.ProcessID,
 	crashFaults int,
-	coinFactory CoinFactory,
+	coin coin.TsCoinScheme,
 	beb broadcaster.Broadcaster,
 	rb broadcaster.Broadcaster,
 	log *zerolog.Logger,
@@ -74,7 +73,7 @@ func New(
 	n.processesCount = len(n.processes)
 	n.quorum = n.processesCount/2 + 1
 	n.crashFaults = crashFaults
-	n.coinFactory = coinFactory
+	n.coin = coin
 	n.coinDomain = make(map[types.Value]struct{})
 
 	n.beb = beb
@@ -103,6 +102,7 @@ func (n *Node) Init() {
 		n.round = 0
 		n.phase = phaseInit
 		n.vals = make(map[types.ProcessID]*types.Value)
+		n.coin.SetReceiver(n)
 	})
 }
 
@@ -374,6 +374,10 @@ func (n *Node) drainPendingPhase() {
 }
 
 func (n *Node) handleCoin(evt coinEvt) {
+	if evt.round != n.round {
+		return
+	}
+
 	majorityValue := n.findMajorityValue(n.crashFaults)
 	if majorityValue != nil {
 		n.decision = majorityValue
@@ -453,19 +457,7 @@ func (n *Node) startCoinFlip() {
 		Any("domain", coinDomain).
 		Msg("start coin flip")
 
-	cc := n.coinFactory(coinDomain...)
-	output := cc.Output()
-	go func() {
-		select {
-		case <-n.ctx.Done():
-			return
-		case val, ok := <-output:
-			if !ok {
-				return
-			}
-			n.triggerApply(coinEvt{output: val})
-		}
-	}()
+	go n.coin.RunScheme(n.round, coinDomain)
 }
 
 func (n *Node) sortedCoinDomain() []types.Value {
@@ -477,6 +469,10 @@ func (n *Node) sortedCoinDomain() []types.Value {
 		return 1
 	})
 	return domain
+}
+
+func (n *Node) ReceiveCoinFlip(val types.Value, ts int) {
+	n.triggerApply(coinEvt{output: val, round: ts})
 }
 
 func (n *Node) Deliver(msg types.Message) {

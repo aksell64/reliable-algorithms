@@ -216,3 +216,15 @@ func TriggerSync(ctx context.Context, ch chan struct{}) {
 func Ptr[T any](v T) *T {
 	return &v
 }
+
+func XORBytes(a, b []byte) []byte {
+	if len(a) != len(b) {
+		return nil
+	}
+
+	result := make([]byte, len(a))
+	for i := range a {
+		result[i] = a[i] ^ b[i]
+	}
+	return result
+}

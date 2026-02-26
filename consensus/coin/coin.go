@@ -2,6 +2,11 @@ package coin
 
 import "reliable/types"
 
-type CommonCoin interface {
-	Output() <-chan types.Value
+type Receiver interface {
+	ReceiveCoinFlip(val types.Value, ts int)
+}
+
+type TsCoinScheme interface {
+	RunScheme(ts int, domain []types.Value)
+	SetReceiver(r Receiver)
 }

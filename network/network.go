@@ -6,11 +6,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	bufReadersCount = 32
-	bufSize         = 4048
-)
-
 func init() {
 	SetGlobal(NewInMemory())
 }
@@ -18,6 +13,7 @@ func init() {
 func Global() Network {
 	return globalNetwork
 }
+
 func SetGlobal(net Network) {
 	globalNetwork = net
 }
@@ -37,4 +33,5 @@ func Disconnect(id uuid.UUID) {}
 type Network interface {
 	Send(from, to types.ProcessID, msg types.Message)
 	Connect(deliverer types.Deliverer)
+	Boostrap() error
 }

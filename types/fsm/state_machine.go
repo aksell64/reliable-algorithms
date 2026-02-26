@@ -14,6 +14,18 @@ type Event interface {
 	Tag() string
 }
 
+type BaseEvent struct {
+	tag string
+}
+
+func (e BaseEvent) Tag() string {
+	return e.tag
+}
+
+func NewBaseEvent(tag string) BaseEvent {
+	return BaseEvent{tag: tag}
+}
+
 type StateMachine struct {
 	state          State
 	handlers       map[State]map[string]Handler

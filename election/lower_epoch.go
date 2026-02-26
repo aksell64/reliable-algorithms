@@ -4,9 +4,11 @@ import (
 	"context"
 	"reliable/database"
 	"reliable/logger"
+	"reliable/messages"
 	"reliable/p2p"
 	"reliable/types"
 	"reliable/utils"
+	"reliable/utils/codec"
 	"slices"
 	"strconv"
 	"sync"
@@ -57,6 +59,7 @@ func NewLowerEpochElection(
 	storage database.KVStore,
 	fl p2p.Link,
 	delayDelta time.Duration,
+	registry *codec.Registry,
 	runtime *types.RuntimeProcessor,
 ) *LowerEpochElection {
 	e := new(LowerEpochElection)
@@ -72,9 +75,10 @@ func NewLowerEpochElection(
 	e.fl = fl
 	e.stopCh = make(chan struct{})
 	e.logger = logger.NewNodeScopeLogger(self, logger.Scope{"election", "lee"})
-	e.logger = zerolog.Nop()
+	//e.logger = zerolog.Nop()
 	e.once = types.NewWorkerOnce()
 
+	codec.RegisterTyped[HeartbeatMessage](registry)
 	if runtime == nil {
 		runtime = types.NewRuntimeProcessor(ctx, types.NewRuntime())
 	}
@@ -138,10 +142,9 @@ func (e *LowerEpochElection) Recovery() {
 
 func (e *LowerEpochElection) background(ctx context.Context) {
 	msg := HeartbeatMessage{
-		id:     uuid.New(),
-		from:   e.self,
-		epoch:  e.epoch,
-		sentAt: time.Now(),
+		BaseMsg: messages.NewBase(uuid.New(), e.self, "hb"),
+		Epoch:   e.epoch,
+		SentAt:  time.Now(),
 	}
 	e.sendEpochHeartbeat(msg)
 
@@ -203,19 +206,12 @@ func (e *LowerEpochElection) tryElection() {
 		delayChanged = true
 	}
 
-	if !delayChanged {
-		e.logger.Info().
-			Int("count candidates", len(candidates)).
-			Str("leader", e.leader.String()).
-			Int64("delay", e.delay.Milliseconds()).Msg("no elected")
+	msg := HeartbeatMessage{
+		BaseMsg: messages.NewBase(uuid.New(), e.self, "hb"),
+		Epoch:   e.epoch,
+		SentAt:  time.Now(),
 	}
 
-	msg := HeartbeatMessage{
-		id:     uuid.New(),
-		from:   e.self,
-		epoch:  e.epoch,
-		sentAt: time.Now(),
-	}
 	e.mu.Unlock()
 
 	e.sendEpochHeartbeat(msg)
@@ -299,11 +295,11 @@ func (e *LowerEpochElection) handleHeartbeat(msg HeartbeatMessage) {
 	defer e.candidatesLock.Unlock()
 
 	curEpoch, ok := e.candidates[msg.From()]
-	if ok && curEpoch >= msg.epoch {
+	if ok && curEpoch >= msg.Epoch {
 		return
 	}
 
-	e.candidates[msg.From()] = msg.epoch
+	e.candidates[msg.From()] = msg.Epoch
 }
 
 func (e *LowerEpochElection) minProcessesRank() (types.ProcessID, types.ProcessRank) {

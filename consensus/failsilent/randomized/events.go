@@ -41,6 +41,7 @@ func (e phaseEvt) mustBeEmbeddedRandNodeEvent() {}
 
 type coinEvt struct {
 	output types.Value
+	round  int
 }
 
 func (e coinEvt) Name() string                 { return coinEvtName }

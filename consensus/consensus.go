@@ -5,7 +5,6 @@ import (
 	"reliable/logger"
 	"reliable/types"
 	"sync"
-	"sync/atomic"
 )
 
 type Consensus interface {
@@ -53,7 +52,6 @@ func PrintDecided(vals []Decided) {
 func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 	results := make(chan Decided, len(nodes))
 	wg := sync.WaitGroup{}
-	count := atomic.Int32{}
 	wg.Add(len(nodes))
 	for _, node := range nodes {
 		go func() {
@@ -70,7 +68,6 @@ func CollectDecided(ctx context.Context, nodes ...Consensus) []Decided {
 					Value:     v,
 				}
 				results <- decided
-				count.Add(1)
 			}
 		}()
 	}
