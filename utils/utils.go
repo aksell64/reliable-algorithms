@@ -217,6 +217,10 @@ func Ptr[T any](v T) *T {
 	return &v
 }
 
+func PtrValue[T any](v *T) T {
+	return *v
+}
+
 func XORBytes(a, b []byte) []byte {
 	if len(a) != len(b) {
 		return nil

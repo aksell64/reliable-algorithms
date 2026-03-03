@@ -78,7 +78,7 @@ func (c *Coin) SetReceiver(receiver coin.Receiver) {
 func (c *Coin) RunScheme(ts int, domain []types.Value) {
 	c.mu.Lock()
 	c.ts = ts
-	pendings, err := c.buffered.GetAndClear(inbox.String(genTsMsgKey(ts)))
+	pendings, err := c.buffered.GetAndClear(inbox.NewStringKey(genTsMsgKey(ts)))
 	if err != nil {
 		c.logger.Error().Err(err).Msg("failed to clear buffered message")
 	}
@@ -115,7 +115,7 @@ func (c *Coin) Deliver(msg types.Message) {
 
 	c.mu.Lock()
 	if smsg.Ts > c.ts {
-		inboxKey := inbox.String(genTsMsgKey(smsg.Ts))
+		inboxKey := inbox.NewStringKey(genTsMsgKey(smsg.Ts))
 		c.buffered.Store(inboxKey, smsg.Inner)
 		c.mu.Unlock()
 	} else if smsg.Ts == c.ts && c.current != nil {
@@ -130,5 +130,5 @@ func (c *Coin) registerCodec(registry *codec.Registry) {
 }
 
 func genTsMsgKey(ts int) string {
-	return fmt.Sprintf("msg_ts%d", ts)
+	return fmt.Sprintf("coin_cr_msg_ts%d", ts)
 }

@@ -79,6 +79,7 @@ func NewLowerEpochElection(
 	e.once = types.NewWorkerOnce()
 
 	codec.RegisterTyped[HeartbeatMessage](registry)
+
 	if runtime == nil {
 		runtime = types.NewRuntimeProcessor(ctx, types.NewRuntime())
 	}

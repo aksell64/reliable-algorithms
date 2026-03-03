@@ -23,7 +23,7 @@ type StringKey struct {
 	str string
 }
 
-func String(str string) StringKey {
+func NewStringKey(str string) StringKey {
 	return StringKey{str: str}
 }
 

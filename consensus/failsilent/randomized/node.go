@@ -2,12 +2,14 @@ package randomized
 
 import (
 	"context"
+	"fmt"
 	"reliable/broadcaster"
 	"reliable/consensus/coin"
 	"reliable/logger"
 	"reliable/messages"
 	"reliable/types"
 	"reliable/utils"
+	"reliable/utils/codec"
 	"slices"
 	"sync"
 	"time"
@@ -50,6 +52,7 @@ type Node struct {
 	stopCh               chan struct{}
 	evts                 chan event
 	logger               zerolog.Logger
+	registry             *codec.Registry
 }
 
 func New(
@@ -61,6 +64,7 @@ func New(
 	beb broadcaster.Broadcaster,
 	rb broadcaster.Broadcaster,
 	log *zerolog.Logger,
+	registry *codec.Registry,
 ) *Node {
 	n := new(Node)
 	n.ctx, n.cancel = context.WithCancel(ctx)
@@ -164,7 +168,11 @@ func (n *Node) background() {
 			n.drainPendingPhase()
 			drainPendingPhaseTimer.Reset(n.drainPendingInterval)
 		case evt := <-n.evts:
-			n.handleEvt(evt)
+			err := n.handleEvt(evt)
+			if err != nil {
+				n.logger.Error().Err(err).Msg("handling event")
+				continue
+			}
 			select {
 			case <-n.ctx.Done():
 			case <-time.After(cooldownInterval):
@@ -174,47 +182,67 @@ func (n *Node) background() {
 	}
 }
 
-func (n *Node) handleEvt(evt event) {
+func (n *Node) handleEvt(evt event) error {
+	var err error
 	switch e := evt.(type) {
 	case proposalEvt:
 		n.handleProposal(e)
 	case proposeEvt:
-		n.handlePropose(e)
+		err = n.handlePropose(e)
 	case phaseEvt:
 		n.handlePhase(e)
 	case coinEvt:
-		n.handleCoin(e)
+		err = n.handleCoin(e)
 	case decidedEvt:
 		n.handleDecided(e)
 	}
+
+	return err
 }
 
 func (n *Node) handleProposal(evt proposalEvt) {
 	n.coinDomain[evt.val] = struct{}{}
 }
 
-func (n *Node) handlePropose(evt proposeEvt) {
+func (n *Node) handlePropose(evt proposeEvt) error {
 	n.proposal = &evt.val
 	n.round = 1
 	n.phase = phase1
 
-	n.beb.Broadcast(n.ctx, n.makePhaseMsg())
-	n.rb.Broadcast(n.ctx, n.makeProposalMsg(evt.val))
-}
-
-func (n *Node) handlePhase(evt phaseEvt) bool {
-	if n.dropOrBuffered(evt) {
-		return false
+	phaseMsg, err := n.makePhaseMsg()
+	if err != nil {
+		return fmt.Errorf("make phase msg: %w, err")
 	}
 
+	proposalMsg, err := n.makeProposalMsg(evt.val)
+	if err != nil {
+		return fmt.Errorf("make proposal msg: %w, err")
+	}
+
+	n.beb.Broadcast(n.ctx, phaseMsg)
+	n.rb.Broadcast(n.ctx, proposalMsg)
+
+	return nil
+}
+
+func (n *Node) handlePhase(evt phaseEvt) (bool, error) {
+	if n.dropOrBuffered(evt) {
+		return false, nil
+	}
+
+	var err error
 	switch evt.phase {
 	case phase1:
-		n.handlePhase1(evt.from, evt.proposal)
+		err = n.handlePhase1(evt.from, evt.proposal)
 	case phase2:
 		n.handlePhase2(evt.from, evt.proposal)
 	}
 
-	return true
+	if err != nil {
+		return true, nil
+	}
+
+	return true, nil
 }
 
 func (n *Node) dropOrBuffered(evt phaseEvt) bool {
@@ -277,7 +305,7 @@ func (n *Node) bufferedPhase(evt phaseEvt) {
 	n.pendingPhase = append(n.pendingPhase, evt)
 }
 
-func (n *Node) handlePhase1(from types.ProcessID, val *types.Value) {
+func (n *Node) handlePhase1(from types.ProcessID, val *types.Value) error {
 	n.vals[from] = val
 
 	n.logger.Info().
@@ -291,10 +319,10 @@ func (n *Node) handlePhase1(from types.ProcessID, val *types.Value) {
 		Msg("received")
 
 	if n.decision != nil {
-		return
+		return nil
 	}
 	if len(n.vals) < n.quorum {
-		return
+		return nil
 	}
 
 	majorityValue := n.findMajorityValue(n.quorum)
@@ -313,7 +341,14 @@ func (n *Node) handlePhase1(from types.ProcessID, val *types.Value) {
 
 	n.vals = make(map[types.ProcessID]*types.Value)
 	n.phase = phase2
-	n.beb.Broadcast(n.ctx, n.makePhaseMsg())
+
+	msg, err := n.makePhaseMsg()
+	if err != nil {
+		return fmt.Errorf("make msg: %w", err)
+	}
+
+	n.beb.Broadcast(n.ctx, msg)
+	return nil
 }
 
 func (n *Node) handlePhase2(from types.ProcessID, val *types.Value) {
@@ -363,7 +398,12 @@ func (n *Node) drainPendingPhase() {
 	n.pendingPhase = n.pendingPhase[:0]
 	countUnprocesses := 0
 	for _, evt := range pending {
-		if !n.handlePhase(evt) {
+		processes, err := n.handlePhase(evt)
+		if err != nil {
+			n.logger.Error().Err(err).Msg("drain phase")
+			continue
+		}
+		if !processes {
 			countUnprocesses++
 		}
 	}
@@ -373,9 +413,9 @@ func (n *Node) drainPendingPhase() {
 	}
 }
 
-func (n *Node) handleCoin(evt coinEvt) {
+func (n *Node) handleCoin(evt coinEvt) error {
 	if evt.round != n.round {
-		return
+		return nil
 	}
 
 	majorityValue := n.findMajorityValue(n.crashFaults)
@@ -389,8 +429,13 @@ func (n *Node) handleCoin(evt coinEvt) {
 			Any("coin", evt.output).
 			Msg("majority decision")
 
-		n.rb.Broadcast(n.ctx, n.makeDecidedMsg())
-		return
+		msg, err := n.makeDecidedMsg()
+		if err != nil {
+			return fmt.Errorf("make msg: %w", err)
+		}
+
+		n.rb.Broadcast(n.ctx, msg)
+		return nil
 	}
 
 	var existsProposal bool
@@ -416,7 +461,15 @@ func (n *Node) handleCoin(evt coinEvt) {
 	n.vals = make(map[types.ProcessID]*types.Value)
 	n.round++
 	n.phase = phase1
-	n.beb.Broadcast(n.ctx, n.makePhaseMsg())
+
+	msg, err := n.makePhaseMsg()
+	if err != nil {
+		return fmt.Errorf("make msg: %w", err)
+	}
+
+	n.beb.Broadcast(n.ctx, msg)
+
+	return nil
 }
 
 func (n *Node) handleDecided(evt decidedEvt) {
@@ -478,19 +531,72 @@ func (n *Node) ReceiveCoinFlip(val types.Value, ts int) {
 func (n *Node) Deliver(msg types.Message) {
 	switch m := msg.(type) {
 	case ProposalMsg:
-		n.asyncTriggerApply(proposalEvt{val: m.Value})
+		n.deliverProposal(m)
 	case PhaseMsg:
-		n.asyncTriggerApply(phaseEvt{
-			m.From(),
-			m.Phase,
-			m.Round,
-			m.Proposal,
-		})
+		n.deliverPhase(m)
 	case DecidedMsg:
-		n.asyncTriggerApply(decidedEvt{
-			val: m.Decided,
-		})
+		n.deliverDecide(m)
 	}
+}
+
+func (n *Node) deliverProposal(msg ProposalMsg) {
+	valObj, err := n.registry.Unmarshal(msg.ValueRaw.Raw, msg.ValueRaw.RawType)
+	if err != nil {
+		n.logger.Error().Err(err).Msg("deliver proposal")
+		return
+	}
+
+	val, ok := valObj.(types.Value)
+	if !ok {
+		n.logger.Error().Err(err).Msg("deliver proposal")
+		return
+	}
+
+	n.asyncTriggerApply(proposalEvt{val: val})
+}
+
+func (n *Node) deliverPhase(msg PhaseMsg) {
+	var value *types.Value
+
+	if msg.ProposalRaw != nil {
+		valObj, err := n.registry.Unmarshal(msg.ProposalRaw.Raw, msg.ProposalRaw.RawType)
+		if err != nil {
+			n.logger.Error().Err(err).Msg("deliver proposal")
+			return
+		}
+
+		val, ok := valObj.(types.Value)
+		if !ok {
+			n.logger.Error().Err(err).Msg("deliver proposal")
+			return
+		}
+		value = &val
+	}
+
+	n.asyncTriggerApply(phaseEvt{
+		msg.From(),
+		msg.Phase,
+		msg.Round,
+		value,
+	})
+}
+
+func (n *Node) deliverDecide(msg DecidedMsg) {
+	valObj, err := n.registry.Unmarshal(msg.DecidedRaw.Raw, msg.DecidedRaw.RawType)
+	if err != nil {
+		n.logger.Error().Err(err).Msg("deliver proposal")
+		return
+	}
+
+	val, ok := valObj.(types.Value)
+	if !ok {
+		n.logger.Error().Err(err).Msg("deliver proposal")
+		return
+	}
+
+	n.asyncTriggerApply(decidedEvt{
+		val: val,
+	})
 }
 
 func (n *Node) asyncTriggerApply(evt event) {
@@ -504,29 +610,53 @@ func (n *Node) triggerApply(evt event) {
 	}
 }
 
-func (n *Node) makeProposalMsg(v types.Value) types.Message {
+func (n *Node) makeProposalMsg(v types.Value) (types.Message, error) {
+	raw, err := n.registry.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshal msg: %w", err)
+	}
+
 	msg := ProposalMsg{
-		Message: messages.NewBase(uuid.New(), n.self, ProposalMsgName),
-		Value:   v,
+		BaseMsg:  messages.NewBase(uuid.New(), n.self, ProposalMsgName),
+		ValueRaw: messages.NewRaw(raw, v.Type()),
 	}
-	return msg
+
+	return msg, nil
 }
 
-func (n *Node) makePhaseMsg() types.Message {
+func (n *Node) makePhaseMsg() (types.Message, error) {
+	raw, err := n.registry.Marshal(n.proposal)
+	if err != nil {
+		return nil, fmt.Errorf("marshal msg: %w", err)
+	}
+
+	var proposal *messages.RawMsg
+	if n.proposal != nil {
+		val := *n.proposal
+		valRaw := messages.NewRaw(raw, val.Type())
+		proposal = &valRaw
+	}
+
 	msg := PhaseMsg{
-		Message:  messages.NewBase(uuid.New(), n.self, PhaseMsgName),
-		Phase:    n.phase,
-		Round:    n.round,
-		Proposal: n.proposal,
+		BaseMsg:     messages.NewBase(uuid.New(), n.self, PhaseMsgName),
+		Phase:       n.phase,
+		Round:       n.round,
+		ProposalRaw: proposal,
 	}
-	return msg
+
+	return msg, nil
 }
 
-func (n *Node) makeDecidedMsg() types.Message {
-	msg := DecidedMsg{
-		Message: messages.NewBase(uuid.New(), n.self, DecidedMsgName),
-		Decided: *n.decision,
+func (n *Node) makeDecidedMsg() (types.Message, error) {
+	raw, err := n.registry.Marshal(n.decided)
+	if err != nil {
+		return nil, fmt.Errorf("marshal msg: %w", err)
 	}
 
-	return msg
+	msg := DecidedMsg{
+		BaseMsg:    messages.NewBase(uuid.New(), n.self, DecidedMsgName),
+		DecidedRaw: messages.NewRaw(raw, utils.PtrValue(n.decision).Type()),
+	}
+
+	return msg, nil
 }

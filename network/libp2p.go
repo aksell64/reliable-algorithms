@@ -9,6 +9,7 @@ import (
 	"reliable/logger"
 	"reliable/messages"
 	"reliable/types"
+	"reliable/utils"
 	"reliable/utils/codec"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -33,13 +35,12 @@ const (
 	streamOpenTimeout       = 10 * time.Second
 	discoveryInterval       = 5 * time.Second
 	msgType                 = "libp2p_msg"
-	clusterHandshakeTimeout = 3 * 30 * time.Second
+	clusterHandshakeTimeout = 5 * 30 * time.Second
 )
 
 type Libp2pMessage struct {
 	messages.BaseMsg
-	InnerType string
-	Inner     []byte
+	messages.RawMsg
 }
 
 func (msg Libp2pMessage) Type() string { return msgType }
@@ -56,6 +57,7 @@ type handshakeMsg struct {
 }
 
 type libp2pNetwork struct {
+	types.Deliverer
 	host   host.Host
 	kdht   *dht.IpfsDHT
 	ctx    context.Context
@@ -83,6 +85,8 @@ type libp2pNetwork struct {
 	// Трекер: кому мы уже отправляли handshake
 	handshakeSent map[peer.ID]bool
 
+	logger *zerolog.Logger
+
 	mu sync.RWMutex
 }
 
@@ -103,6 +107,12 @@ func WithBootstrapPeers(peers []peer.AddrInfo) Libp2pOption {
 		for _, p := range peers {
 			n.boostrapConnect(p)
 		}
+	}
+}
+
+func WithLogger(l zerolog.Logger) Libp2pOption {
+	return func(network *libp2pNetwork) {
+		network.logger = &l
 	}
 }
 
@@ -159,12 +169,18 @@ func NewLibp2p(
 		handshakeSent: make(map[peer.ID]bool),
 	}
 
+	n.Deliverer = types.NewUnaryDeliverer(localPID)
+
 	// Регистрируем себя в маппинге
 	n.peerToPID[h.ID()] = localPID
 	n.pidToPeer[localPID] = h.ID()
 
 	for _, opt := range opts {
 		opt(n)
+	}
+
+	if n.logger == nil {
+		n.logger = utils.Ptr(logger.NewNodeScopeLogger(localPID, logger.Scope{"net", "libp2p"}))
 	}
 
 	codec.RegisterTyped[Libp2pMessage](n.registry)
@@ -176,9 +192,11 @@ func NewLibp2p(
 		}
 
 		msg := Libp2pMessage{
-			BaseMsg:   messages.NewBase(uuid.New(), n.localPID, msgType),
-			Inner:     inner,
-			InnerType: message.Type(),
+			BaseMsg: messages.NewBase(uuid.New(), n.localPID, msgType),
+			RawMsg: messages.RawMsg{
+				Raw:     inner,
+				RawType: message.Type(),
+			},
 		}
 
 		return n.registry.Marshal(msg)
@@ -195,7 +213,7 @@ func NewLibp2p(
 			return nil, fmt.Errorf("failed to unmarshal libp2p message")
 		}
 
-		innerMsg, err := n.registry.Unmarshal(msg.Inner, msg.InnerType)
+		innerMsg, err := n.registry.Unmarshal(msg.Raw, msg.RawType)
 		if err != nil {
 			return nil, err
 		}
@@ -229,8 +247,7 @@ func NewLibp2p(
 	// Обработчик handshake — когда кто-то сообщает свой ProcessID
 	h.SetStreamHandler(HandshakeProtocol, n.handleHandshake)
 
-	fmt.Printf("[libp2p] Host started. PID: %v, ID: %s, Addrs: %v\n",
-		localPID, h.ID(), h.Addrs())
+	n.logger.Info().Any("addrs", h.Addrs()).Str("peerID", h.ID().String()).Msg("host started")
 
 	// Запускаем discovery в фоне
 	go n.discoverPeers()
@@ -243,10 +260,10 @@ func (n *libp2pNetwork) boostrapConnect(p peer.AddrInfo) {
 		return
 	}
 	if err := n.host.Connect(n.ctx, p); err != nil {
-		//fmt.Printf("[libp2p] warning: failed to connect to bootstrap peer %s: %v\n", p.ID, err)
-	} else {
-		fmt.Printf("[libp2p] connected to bootstrap peer %s\n", p.ID)
+		return
 	}
+
+	n.logger.Info().Str("peer", p.ID.String()).Msg("connected to bootstrap peer")
 }
 
 func (n *libp2pNetwork) Boostrap() error {
@@ -259,7 +276,7 @@ func (n *libp2pNetwork) discoverPeers() {
 
 	// Объявляем себя
 	dutil.Advertise(n.ctx, routingDiscovery, Rendezvous)
-	fmt.Printf("[libp2p] Advertised on rendezvous: %s\n", Rendezvous)
+	n.logger.Info().Str("rendezvous", Rendezvous).Msg("Advertised")
 
 	ticker := time.NewTicker(discoveryInterval)
 	defer ticker.Stop()
@@ -274,13 +291,14 @@ func (n *libp2pNetwork) discoverPeers() {
 			found := len(n.pidToPeer)
 			n.mu.RUnlock()
 			if found >= n.clusterN {
-				continue // все уже на месте
+				n.markClusterReady()
+				return
 			}
 
 			// Ищем пиров
 			peerChan, err := routingDiscovery.FindPeers(n.ctx, Rendezvous)
 			if err != nil {
-				fmt.Printf("[libp2p] discovery error: %v\n", err)
+				n.logger.Error().Err(err).Msg("discovery: find peers")
 				continue
 			}
 
@@ -289,27 +307,32 @@ func (n *libp2pNetwork) discoverPeers() {
 					continue
 				}
 
+				//n.logger.Info().Str("peer", p.ID.String()).Msg("found peer")
+
 				// Уже знаем этого пира?
 				n.mu.RLock()
 				_, known := n.peerToPID[p.ID]
 				n.mu.RUnlock()
 				if known {
+					n.logger.Info().Str("peer", p.ID.String()).Msg("already known")
 					continue
 				}
 
-				// Подключаемся
-				if n.host.Network().Connectedness(p.ID) != network.Connected {
-					ctx, cancel := context.WithTimeout(n.ctx, streamOpenTimeout)
-					err := n.host.Connect(ctx, p)
-					cancel()
-					if err != nil {
-						//fmt.Printf("[libp2p] failed to connect to discovered peer %s: %v\n", p.ID, err)
-						continue
+				go func() {
+					// Подключаемся
+					if n.host.Network().Connectedness(p.ID) != network.Connected {
+						ctx, cancel := context.WithTimeout(n.ctx, streamOpenTimeout)
+						err := n.host.Connect(ctx, p)
+						cancel()
+						if err != nil {
+							//n.logger.Error().Err(err).Str("peer", p.ID.String()).Msg("connect")
+							return
+						}
 					}
-				}
 
-				// Отправляем handshake — сообщаем свой ProcessID
-				n.sendHandshake(p.ID)
+					// Отправляем handshake — сообщаем свой ProcessID
+					n.sendHandshake(p.ID)
+				}()
 			}
 		}
 	}
@@ -330,7 +353,7 @@ func (n *libp2pNetwork) sendHandshake(peerID peer.ID) {
 
 	s, err := n.host.NewStream(ctx, peerID, HandshakeProtocol)
 	if err != nil {
-		fmt.Printf("[libp2p] handshake stream failed to %s: %v\n", peerID, err)
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("handshake stream")
 		// Сбрасываем флаг, чтобы можно было попробовать ещё раз
 		n.mu.Lock()
 		delete(n.handshakeSent, peerID)
@@ -346,11 +369,11 @@ func (n *libp2pNetwork) sendHandshake(peerID peer.ID) {
 	}
 
 	if err := writeLengthPrefixed(s, data); err != nil {
-		fmt.Printf("[libp2p] handshake write failed: %v\n", err)
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("handshake write")
 		return
 	}
 
-	fmt.Printf("[libp2p] sent handshake to %s (our PID: %v)\n", peerID, n.localPID)
+	n.logger.Info().Str("peer", peerID.String()).Msg("handshake sent")
 }
 
 func (n *libp2pNetwork) handleHandshake(s network.Stream) {
@@ -358,13 +381,13 @@ func (n *libp2pNetwork) handleHandshake(s network.Stream) {
 
 	data, err := readLengthPrefixed(s)
 	if err != nil {
-		fmt.Printf("[libp2p] handshake read error: %v\n", err)
+		n.logger.Error().Err(err).Msg("handshake read")
 		return
 	}
 
 	var hs handshakeMsg
 	if err := json.Unmarshal(data, &hs); err != nil {
-		fmt.Printf("[libp2p] handshake decode error: %v\n", err)
+		n.logger.Error().Err(err).Msg("handshake unmarshal")
 		return
 	}
 
@@ -377,8 +400,12 @@ func (n *libp2pNetwork) handleHandshake(s network.Stream) {
 	currentCount := len(n.pidToPeer)
 	n.mu.Unlock()
 
-	fmt.Printf("[libp2p] handshake received: peer %s -> PID %v (%d/%d)\n",
-		remotePeerID, hs.ProcessID, currentCount, n.clusterN)
+	n.logger.Info().
+		Str("peer", remotePeerID.String()).
+		Str("pid", hs.ProcessID.String()).
+		Int("count", currentCount).
+		Int("clusterN", n.clusterN).
+		Msg("handshake received")
 
 	// Отправляем ответный ТОЛЬКО если мы ещё не знали этого пира
 	// (то есть это первый хэндшейк от него)
@@ -387,17 +414,21 @@ func (n *libp2pNetwork) handleHandshake(s network.Stream) {
 	}
 
 	if currentCount >= n.clusterN {
-		n.readyOnce.Do(func() {
-			close(n.clusterReady)
-			fmt.Printf("[libp2p] ✅ Cluster ready! All %d peers discovered.\n", n.clusterN)
-		})
+		n.markClusterReady()
 	}
+}
+
+func (n *libp2pNetwork) markClusterReady() {
+	n.readyOnce.Do(func() {
+		close(n.clusterReady)
+	})
 }
 
 // waitForCluster — блокирует до тех пор, пока все N пиров не обнаружены.
 func (n *libp2pNetwork) waitForCluster(timeout time.Duration) error {
 	select {
 	case <-n.clusterReady:
+		n.logger.Info().Msg("[libp2p] Cluster ready")
 		return nil
 	case <-time.After(timeout):
 		n.mu.RLock()
@@ -414,50 +445,29 @@ func (n *libp2pNetwork) handleStream(s network.Stream) {
 
 	data, err := readLengthPrefixed(s)
 	if err != nil {
-		fmt.Printf("[libp2p] error reading stream: %v\n", err)
+		n.logger.Error().Err(err).Msg("stream read")
 		return
 	}
 
 	var wire wireMessage
 	if err := json.Unmarshal(data, &wire); err != nil {
-		fmt.Printf("[libp2p] error decoding wire message: %v\n", err)
+		n.logger.Error().Err(err).Msg("wire unmarshal")
 		return
 	}
 
 	msg, err := n.unmarshal(wire.Payload)
 	if err != nil {
-		fmt.Printf("[libp2p] error unmarshaling payload: %v\n", err)
+		n.logger.Error().Err(err).Msg("wire payload unmarshal")
 		return
 	}
 
-	n.mu.RLock()
-	deliverer, ok := n.deliverers[wire.ToPID]
-	n.mu.RUnlock()
-
-	if !ok {
-		fmt.Printf("[libp2p] no deliverer for process %v\n", wire.ToPID)
-		return
-	}
-
-	deliverer.Deliver(msg)
+	n.Deliverer.Deliver(msg)
 }
 
-// Send — теперь ищет peer.ID динамически через маппинг.
 func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
-	// Локальная доставка
-	n.mu.RLock()
-	if deliverer, ok := n.deliverers[to]; ok {
-		if _, isLocal := n.peerToPID[n.host.ID()]; isLocal && from == to {
-			n.mu.RUnlock()
-			deliverer.Deliver(msg)
-			return
-		}
-	}
-	n.mu.RUnlock()
-
 	payload, err := n.marshal(msg)
 	if err != nil {
-		fmt.Printf("[libp2p] marshal error: %v\n", err)
+		n.logger.Error().Err(err).Msg("marshal send msg")
 		return
 	}
 
@@ -468,7 +478,7 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	}
 	data, err := json.Marshal(wire)
 	if err != nil {
-		fmt.Printf("[libp2p] wire marshal error: %v\n", err)
+		n.logger.Error().Err(err).Msg("wire marshal msg")
 		return
 	}
 
@@ -478,7 +488,9 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	n.mu.RUnlock()
 
 	if !ok {
-		fmt.Printf("[libp2p] no peer found for PID %v (cluster not ready?)\n", to)
+		n.logger.Error().Err(err).
+			Str("peer", peerID.String()).
+			Msg("no peer found for PID (cluster not ready?)")
 		return
 	}
 
@@ -502,20 +514,18 @@ func (n *libp2pNetwork) sendToPeerByID(peerID peer.ID, data []byte) {
 
 	s, err := n.host.NewStream(ctx, peerID, ProtocolID)
 	if err != nil {
-		fmt.Printf("[libp2p] stream open failed to %s: %v\n", peerID, err)
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("stream open")
 		return
 	}
 	defer s.Close()
 
 	if err := writeLengthPrefixed(s, data); err != nil {
-		fmt.Printf("[libp2p] write failed: %v\n", err)
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("write to stream")
 	}
 }
 
 func (n *libp2pNetwork) Connect(deliverer types.Deliverer) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.deliverers[deliverer.ProcessID()] = deliverer
+	n.Deliverer.AddDeliverer(deliverer)
 }
 
 func (n *libp2pNetwork) Close() error {

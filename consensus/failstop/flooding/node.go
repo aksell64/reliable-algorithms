@@ -152,7 +152,7 @@ func (n *Node) propose(v types.Value) {
 	n.pauser.Checkpoint()
 	n.handlePropose(n.pid, round, []types.Value{v})
 	n.pauser.Checkpoint()
-	msg := messages.ProposalMessage{
+	msg := ProposalMessage{
 		Id:        uuid.New(),
 		PID:       n.pid,
 		Proposals: n.getProposals(round),
@@ -257,7 +257,7 @@ func (n *Node) background() {
 				decision := n.selector.Select(n.getProposals(n.round))
 				n.mu.RUnlock()
 
-				msg := messages.DecidedMessage{
+				msg := DecidedMessage{
 					Id:       uuid.New(),
 					Decision: decision,
 					PID:      n.pid,
@@ -282,7 +282,7 @@ func (n *Node) nextRound() {
 	n.pauser.Checkpoint()
 	n.logger.Info().Int("round", round).Msg("nextRound")
 
-	msg := messages.ProposalMessage{
+	msg := ProposalMessage{
 		Id:        uuid.New(),
 		Proposals: n.getProposals(n.round - 1),
 		Round:     n.round,
@@ -386,11 +386,11 @@ func (n *Node) Deliver(msg types.Message) {
 
 func (n *Node) deliver(msg types.Message) {
 	switch m := msg.(type) {
-	case messages.ProposalMessage:
+	case ProposalMessage:
 		go n.handlePropose(m.PID, m.Round, m.Proposals)
-	case messages.DecidedMessage:
+	case DecidedMessage:
 		go n.handleDecide(m.PID, m.Decision)
-	case messages.CrashMessage:
+	case CrashMessage:
 		go n.handleCrash(m.PID)
 	}
 }

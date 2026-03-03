@@ -43,7 +43,7 @@ func main() {
 
 	registry := codec.New()
 
-	err := setupLAN(*listenAddr, pid, n, registry)
+	net, err := setupLAN(*listenAddr, pid, n, registry)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -57,6 +57,11 @@ func main() {
 
 	// --- Creating and starting the election ---
 	e := makeElection(ctx, processes, pid, registry)
+
+	if err = net.Boostrap(); err != nil {
+		log.Fatal(err)
+	}
+
 	e.Init()
 	e.Start()
 
@@ -75,15 +80,10 @@ func makeElection(
 	return e
 }
 
-func setupLAN(listenAddr string, processID types.ProcessID, N int, registry *codec.Registry) error {
+func setupLAN(listenAddr string, processID types.ProcessID, N int, registry *codec.Registry) (network.Network, error) {
 	net := network.NewLibp2p([]string{listenAddr}, processID, N,
 		network.WithRegistry(registry))
 
-	err := net.Boostrap()
-	if err != nil {
-		return err
-	}
-
 	network.SetGlobal(net)
-	return nil
+	return net, nil
 }

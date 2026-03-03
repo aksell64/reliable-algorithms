@@ -1,6 +1,8 @@
 package randomized
 
-import "reliable/types"
+import (
+	"reliable/messages"
+)
 
 const (
 	ProposalMsgName = "proposal"
@@ -9,18 +11,33 @@ const (
 )
 
 type ProposalMsg struct {
-	types.Message
-	Value types.Value
+	messages.BaseMsg
+	ValueRaw messages.RawMsg
+	//Value types.Value
+}
+
+func (m ProposalMsg) Type() string {
+	return ProposalMsgName
 }
 
 type PhaseMsg struct {
-	types.Message
-	Phase    string
-	Round    int
-	Proposal *types.Value
+	messages.BaseMsg
+	Phase       string
+	Round       int
+	ProposalRaw *messages.RawMsg
+	//Proposal    *types.Value
+}
+
+func (m PhaseMsg) Type() string {
+	return PhaseMsgName
 }
 
 type DecidedMsg struct {
-	types.Message
-	Decided types.Value
+	messages.BaseMsg
+	DecidedRaw messages.RawMsg
+	//Decided    types.Value
+}
+
+func (m DecidedMsg) Type() string {
+	return DecidedMsgName
 }

@@ -7,6 +7,7 @@ import (
 	"reliable/messages"
 	"reliable/types"
 	"reliable/utils"
+	"reliable/utils/codec"
 	"sync"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type lazyReliableBroadcaster struct {
 	received map[types.ProcessID]map[uuid.UUID]types.Message
 	mu       sync.RWMutex
 	logger   zerolog.Logger
+	registry *codec.Registry
 	once     *types.WorkerOnce
 }
 
@@ -31,6 +33,7 @@ func NewLazyReliableBroadcaster(
 	self types.ProcessID,
 	beb Broadcaster,
 	pfd *failure.PerfectFailureDetector,
+	registry *codec.Registry,
 ) Broadcaster {
 	rb := &lazyReliableBroadcaster{
 		Deliverer: types.NewUnaryDeliverer(self),
@@ -41,10 +44,13 @@ func NewLazyReliableBroadcaster(
 		received:  make(map[types.ProcessID]map[uuid.UUID]types.Message),
 		logger:    logger.NewNodeScopeLogger(self, logger.Scope{"bcaster", "rb"}),
 		once:      types.NewWorkerOnce(),
+		registry:  registry,
 	}
 
 	beb.AddDeliverer(rb)
 	rb.beb = beb
+
+	codec.RegisterTyped[ReliableBroadcastMessage](registry)
 
 	return rb
 }
@@ -79,17 +85,34 @@ func (b *lazyReliableBroadcaster) RemoveCorrect(id types.ProcessID) {
 }
 
 func (b *lazyReliableBroadcaster) Broadcast(ctx context.Context, msg types.Message) {
-	bmsg := messages.ReliableBroadcastMessage{
-		Id:     uuid.New(),
-		Inner:  msg,
-		Sender: b.self,
+	raw, err := b.registry.Marshal(msg)
+	if err != nil {
+		b.logger.Error().Err(err).Msg("marshal inner msg")
+		return
+	}
+
+	bmsg := ReliableBroadcastMessage{
+		BaseMsg: messages.NewBase(uuid.New(), b.self, ReliableBroadcastMessageName),
+		RawMsg:  messages.NewRaw(raw, msg.Type()),
 	}
 	b.beb.Broadcast(ctx, bmsg)
 }
 
 func (b *lazyReliableBroadcaster) Deliver(msg types.Message) {
-	bmsg, ok := msg.(messages.ReliableBroadcastMessage)
+	bmsg, ok := msg.(ReliableBroadcastMessage)
 	if !ok {
+		return
+	}
+
+	innerObj, err := b.registry.Unmarshal(bmsg.Raw, bmsg.RawType)
+	if err != nil {
+		b.logger.Error().Err(err).Msg("unmarshal inner msg")
+		return
+	}
+
+	innerMsg, ok := innerObj.(types.Message)
+	if !ok {
+		b.logger.Error().Msg("convert inner msg")
 		return
 	}
 
@@ -107,7 +130,7 @@ func (b *lazyReliableBroadcaster) Deliver(msg types.Message) {
 	b.mu.Unlock()
 
 	//b.logger.Info().Str("msg", msg.Name()).Str("from", msg.From().String()).Msg("delivering message")
-	b.Deliverer.Deliver(bmsg.Inner)
+	b.Deliverer.Deliver(innerMsg)
 
 	b.mu.Lock()
 	b.received[msg.From()][msg.ID()] = msg
@@ -152,6 +175,7 @@ type eagerReliableBroadcaster struct {
 	delivered map[uuid.UUID]struct{}
 	mu        sync.Mutex
 	once      *types.WorkerOnce
+	registry  *codec.Registry
 }
 
 func NewEagerReliableBroadcaster(
@@ -159,6 +183,7 @@ func NewEagerReliableBroadcaster(
 	self types.ProcessID,
 	processes []types.ProcessID,
 	beb Broadcaster,
+	registry *codec.Registry,
 ) Broadcaster {
 	rb := &eagerReliableBroadcaster{
 		ctx:       ctx,
@@ -174,6 +199,9 @@ func NewEagerReliableBroadcaster(
 	for _, p := range processes {
 		rb.AddCorrect(p)
 	}
+
+	codec.RegisterTyped[ReliableBroadcastMessage](registry)
+
 	return rb
 }
 
@@ -200,17 +228,30 @@ func (b *eagerReliableBroadcaster) RemoveCorrect(id types.ProcessID) {
 }
 
 func (b *eagerReliableBroadcaster) Broadcast(ctx context.Context, msg types.Message) {
-	bmsg := messages.ReliableBroadcastMessage{
-		Id:     uuid.New(),
-		Inner:  msg,
-		Sender: b.self,
+	raw, err := b.registry.Marshal(msg)
+	if err != nil {
+		return
 	}
 
+	bmsg := ReliableBroadcastMessage{
+		BaseMsg: messages.NewBase(uuid.New(), b.self, ReliableBroadcastMessageName),
+		RawMsg:  messages.NewRaw(raw, msg.Type()),
+	}
 	b.beb.Broadcast(ctx, bmsg)
 }
 
 func (b *eagerReliableBroadcaster) Deliver(msg types.Message) {
-	bmsg, ok := msg.(messages.ReliableBroadcastMessage)
+	bmsg, ok := msg.(ReliableBroadcastMessage)
+	if !ok {
+		return
+	}
+
+	innerObj, err := b.registry.Unmarshal(bmsg.Raw, bmsg.RawType)
+	if err != nil {
+		return
+	}
+
+	innerMsg, ok := innerObj.(types.Message)
 	if !ok {
 		return
 	}
@@ -223,7 +264,7 @@ func (b *eagerReliableBroadcaster) Deliver(msg types.Message) {
 	b.delivered[bmsg.ID()] = struct{}{}
 	b.mu.Unlock()
 
-	b.Deliverer.Deliver(bmsg.Inner)
+	b.Deliverer.Deliver(innerMsg)
 	b.beb.Broadcast(b.ctx, bmsg)
 }
 
