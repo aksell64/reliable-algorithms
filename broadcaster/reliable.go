@@ -192,6 +192,7 @@ func NewEagerReliableBroadcaster(
 		delivered: make(map[uuid.UUID]struct{}),
 		Deliverer: types.NewUnaryDeliverer(self),
 		once:      types.NewWorkerOnce(),
+		registry:  registry,
 	}
 
 	beb.AddDeliverer(rb)

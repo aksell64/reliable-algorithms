@@ -2,16 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"reliable/broadcaster"
 	"reliable/consensus"
-	"reliable/consensus/coin/commitreveal"
+	"reliable/consensus/coin/simple"
 	"reliable/consensus/failsilent/randomized"
-	"reliable/database"
 	"reliable/messages"
 	"reliable/p2p"
 	"reliable/types"
-	"reliable/types/inbox"
 	"reliable/utils"
 	"reliable/utils/codec"
 )
@@ -50,6 +47,8 @@ func makeConsensus(
 	pid types.ProcessID,
 	crashFaults int,
 ) consensus.Consensus {
+	registry := codec.New()
+
 	fl := p2p.NewBaseLink(pid)
 	sl := p2p.NewStubbornP2PLinks(ctx, fl)
 	pl := p2p.NewPerfectP2PLinks(pid, sl)
@@ -64,30 +63,31 @@ func makeConsensus(
 		broadcaster.DefaultBroadcastNodeSelector(),
 		pl)
 
-	rb := broadcaster.NewEagerReliableBroadcaster(ctx, pid, processes, beb1)
+	rb := broadcaster.NewEagerReliableBroadcaster(ctx, pid, processes, beb1, registry)
 
-	hasher := sha256.New()
+	//hasher := sha256.New()
 
-	registry := codec.New()
 	codec.RegisterTyped[messages.BaseMsg](registry)
 
-	storage := database.NewInMemory()
+	//storage := database.NewInMemory()
 
-	ibox := inbox.New(registry, storage)
+	//ibox := inbox.New(registry, storage)
 
-	coin := commitreveal.NewCoin(
-		ctx,
-		pid,
-		hasher,
-		processes,
-		len(processes),
-		crashFaults,
-		beb2,
-		ibox,
-		registry,
-		nil,
-	)
+	//coin := commitreveal.NewCoin(
+	//	ctx,
+	//	pid,
+	//	hasher,
+	//	processes,
+	//	len(processes),
+	//	crashFaults,
+	//	beb2,
+	//	ibox,
+	//	registry,
+	//	nil,
+	//)
 
-	node := randomized.New(ctx, processes, pid, crashFaults, coin, beb2, rb, nil)
+	coin := simple.NewBiasedLocalRandCoin()
+
+	node := randomized.New(ctx, processes, pid, crashFaults, coin, beb2, rb, nil, registry)
 	return node
 }

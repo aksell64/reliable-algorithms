@@ -30,6 +30,7 @@ import (
 const (
 	ProtocolID              = protocol.ID("/reliable/1.0.0")
 	HandshakeProtocol       = protocol.ID("/reliable/handshake/1.0.0")
+	ReadyProtocol           = protocol.ID("/reliable/ready/1.0.0")
 	Rendezvous              = "reliable/cluster/v1"
 	maxReadSize             = 1 << 20
 	streamOpenTimeout       = 10 * time.Second
@@ -49,6 +50,10 @@ type wireMessage struct {
 	FromPID types.ProcessID `json:"from_pid"`
 	ToPID   types.ProcessID `json:"to_pid"`
 	Payload json.RawMessage `json:"payload"`
+}
+
+type readyMsg struct {
+	ProcessID types.ProcessID `json:"process_id"`
 }
 
 // handshakeMsg — при подключении каждый пир сообщает свой ProcessID.
@@ -82,6 +87,12 @@ type libp2pNetwork struct {
 	registry       *codec.Registry
 	customBoostrap bool
 
+	// === Фаза 2: Ready-барьер ===
+	readyReceived map[types.ProcessID]bool // от кого получили "ready"
+	allReady      chan struct{}            // закрывается когда ВСЕ прислали ready
+	allReadyOnce  sync.Once
+	readySent     bool // отправляли ли мы уже ready всем
+
 	// Трекер: кому мы уже отправляли handshake
 	handshakeSent map[peer.ID]bool
 
@@ -113,6 +124,12 @@ func WithBootstrapPeers(peers []peer.AddrInfo) Libp2pOption {
 func WithLogger(l zerolog.Logger) Libp2pOption {
 	return func(network *libp2pNetwork) {
 		network.logger = &l
+	}
+}
+
+func DisableLogger() Libp2pOption {
+	return func(network *libp2pNetwork) {
+		network.logger = utils.Ptr(zerolog.Nop())
 	}
 }
 
@@ -167,6 +184,8 @@ func NewLibp2p(
 		clusterReady:  make(chan struct{}),
 		registry:      codec.New(),
 		handshakeSent: make(map[peer.ID]bool),
+		readyReceived: make(map[types.ProcessID]bool),
+		allReady:      make(chan struct{}),
 	}
 
 	n.Deliverer = types.NewUnaryDeliverer(localPID)
@@ -247,6 +266,8 @@ func NewLibp2p(
 	// Обработчик handshake — когда кто-то сообщает свой ProcessID
 	h.SetStreamHandler(HandshakeProtocol, n.handleHandshake)
 
+	h.SetStreamHandler(ReadyProtocol, n.handleReady)
+
 	n.logger.Info().Any("addrs", h.Addrs()).Str("peerID", h.ID().String()).Msg("host started")
 
 	// Запускаем discovery в фоне
@@ -267,7 +288,7 @@ func (n *libp2pNetwork) boostrapConnect(p peer.AddrInfo) {
 }
 
 func (n *libp2pNetwork) Boostrap() error {
-	return n.waitForCluster(clusterHandshakeTimeout)
+	return n.waitForCluster()
 }
 
 // discoverPeers — ищет пиров через DHT по Rendezvous-строке.
@@ -418,23 +439,141 @@ func (n *libp2pNetwork) handleHandshake(s network.Stream) {
 	}
 }
 
+func (n *libp2pNetwork) broadcastReady() {
+	n.mu.Lock()
+	if n.readySent {
+		n.mu.Unlock()
+		return
+	}
+	n.readySent = true
+
+	// Считаем себя тоже "ready"
+	n.readyReceived[n.localPID] = true
+	currentReady := len(n.readyReceived)
+
+	// Собираем список пиров для рассылки ПОД ЛОКОМ
+	peers := make([]peer.ID, 0, len(n.peerToPID))
+	for peerID, pid := range n.peerToPID {
+		if pid != n.localPID {
+			peers = append(peers, peerID)
+		}
+	}
+	n.mu.Unlock()
+
+	n.logger.Info().Int("readyCount", currentReady).Msg("broadcasting READY to all peers")
+
+	// СНАЧАЛА рассылаем READY всем — ВСЕГДА, без исключений
+	for _, peerID := range peers {
+		go n.sendReady(peerID)
+	}
+
+	// ПОТОМ проверяем, может мы уже всех собрали
+	if currentReady >= n.clusterN {
+		n.markAllReady()
+	}
+}
+
+func (n *libp2pNetwork) sendReady(peerID peer.ID) {
+	ctx, cancel := context.WithTimeout(n.ctx, streamOpenTimeout)
+	defer cancel()
+
+	s, err := n.host.NewStream(ctx, peerID, ReadyProtocol)
+	if err != nil {
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("ready stream open failed")
+		// Retry через секунду
+		go func() {
+			time.Sleep(1 * time.Second)
+			n.sendReady(peerID)
+		}()
+		return
+	}
+	defer s.Close()
+
+	rm := readyMsg{ProcessID: n.localPID}
+	data, err := json.Marshal(rm)
+	if err != nil {
+		return
+	}
+
+	if err := writeLengthPrefixed(s, data); err != nil {
+		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("ready write failed")
+	}
+
+	n.logger.Info().Str("peer", peerID.String()).Msg("READY sent")
+}
+
+func (n *libp2pNetwork) handleReady(s network.Stream) {
+	defer s.Close()
+
+	data, err := readLengthPrefixed(s)
+	if err != nil {
+		n.logger.Error().Err(err).Msg("ready read")
+		return
+	}
+
+	var rm readyMsg
+	if err := json.Unmarshal(data, &rm); err != nil {
+		n.logger.Error().Err(err).Msg("ready unmarshal")
+		return
+	}
+
+	n.mu.Lock()
+	n.readyReceived[rm.ProcessID] = true
+	currentReady := len(n.readyReceived)
+	n.mu.Unlock()
+
+	n.logger.Info().
+		Str("fromPID", rm.ProcessID.String()).
+		Int("readyCount", currentReady).
+		Int("clusterN", n.clusterN).
+		Msg("READY received")
+
+	if currentReady >= n.clusterN {
+		n.markAllReady()
+	}
+}
+
+func (n *libp2pNetwork) markAllReady() {
+	n.allReadyOnce.Do(func() {
+		n.logger.Info().Msg("✅ ALL peers READY — cluster fully synchronized")
+		close(n.allReady)
+	})
+}
+
 func (n *libp2pNetwork) markClusterReady() {
 	n.readyOnce.Do(func() {
 		close(n.clusterReady)
+		// Фаза 1 завершена → запускаем фазу 2
+		n.logger.Info().Msg("Phase 1 complete (all peers discovered). Starting ready-barrier...")
+		go n.broadcastReady()
 	})
 }
 
 // waitForCluster — блокирует до тех пор, пока все N пиров не обнаружены.
-func (n *libp2pNetwork) waitForCluster(timeout time.Duration) error {
+func (n *libp2pNetwork) waitForCluster() error {
+	// Фаза 1: ждём discovery всех пиров
 	select {
 	case <-n.clusterReady:
-		n.logger.Info().Msg("[libp2p] Cluster ready")
-		return nil
-	case <-time.After(timeout):
+		n.logger.Info().Msg("[Bootstrap] Phase 1 done: all peers discovered")
+	case <-time.After(clusterHandshakeTimeout):
 		n.mu.RLock()
 		got := len(n.pidToPeer)
 		n.mu.RUnlock()
-		return fmt.Errorf("cluster assembly timeout: got %d/%d peers", got, n.clusterN)
+		return fmt.Errorf("phase 1 timeout: discovered %d/%d peers", got, n.clusterN)
+	case <-n.ctx.Done():
+		return n.ctx.Err()
+	}
+
+	// Фаза 2: ждём ready от всех
+	select {
+	case <-n.allReady:
+		n.logger.Info().Msg("[Bootstrap] Phase 2 done: all peers confirmed ready ✅")
+		return nil
+	case <-time.After(clusterHandshakeTimeout):
+		n.mu.RLock()
+		got := len(n.readyReceived)
+		n.mu.RUnlock()
+		return fmt.Errorf("phase 2 timeout: got ready from %d/%d peers", got, n.clusterN)
 	case <-n.ctx.Done():
 		return n.ctx.Err()
 	}

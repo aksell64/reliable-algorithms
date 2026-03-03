@@ -97,6 +97,10 @@ func New(
 		n.logger = logger.NewNodeScopeLogger(self, logger.Scope{"consensus", "randomized"})
 	}
 
+	n.registry = registry
+
+	n.registerCodec()
+
 	return n
 }
 
@@ -153,19 +157,15 @@ func (n *Node) background() {
 	drainPendingPhaseTimer := time.NewTimer(n.drainPendingInterval)
 	defer drainPendingPhaseTimer.Stop()
 	cooldownInterval := 50 * time.Millisecond
-	downTimeInterval := 10 * time.Second
-	downTimeTimer := time.NewTimer(downTimeInterval)
-	defer downTimeTimer.Stop()
 
 	for n.ctx.Err() == nil {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-downTimeTimer.C:
-			n.logger.Warn().Msg("downtime!")
-			downTimeTimer.Reset(downTimeInterval)
 		case <-drainPendingPhaseTimer.C:
-			n.drainPendingPhase()
+			if n.phase != phaseInit {
+				n.drainPendingPhase()
+			}
 			drainPendingPhaseTimer.Reset(n.drainPendingInterval)
 		case evt := <-n.evts:
 			err := n.handleEvt(evt)
@@ -177,7 +177,6 @@ func (n *Node) background() {
 			case <-n.ctx.Done():
 			case <-time.After(cooldownInterval):
 			}
-			downTimeTimer.Reset(downTimeInterval)
 		}
 	}
 }
@@ -190,7 +189,7 @@ func (n *Node) handleEvt(evt event) error {
 	case proposeEvt:
 		err = n.handlePropose(e)
 	case phaseEvt:
-		n.handlePhase(e)
+		_, err = n.handlePhase(e)
 	case coinEvt:
 		err = n.handleCoin(e)
 	case decidedEvt:
@@ -211,12 +210,12 @@ func (n *Node) handlePropose(evt proposeEvt) error {
 
 	phaseMsg, err := n.makePhaseMsg()
 	if err != nil {
-		return fmt.Errorf("make phase msg: %w, err")
+		return fmt.Errorf("make phase msg: %w", err)
 	}
 
 	proposalMsg, err := n.makeProposalMsg(evt.val)
 	if err != nil {
-		return fmt.Errorf("make proposal msg: %w, err")
+		return fmt.Errorf("make proposal msg: %w", err)
 	}
 
 	n.beb.Broadcast(n.ctx, phaseMsg)
@@ -344,7 +343,7 @@ func (n *Node) handlePhase1(from types.ProcessID, val *types.Value) error {
 
 	msg, err := n.makePhaseMsg()
 	if err != nil {
-		return fmt.Errorf("make msg: %w", err)
+		return fmt.Errorf("make phase msg: %w", err)
 	}
 
 	n.beb.Broadcast(n.ctx, msg)
@@ -429,9 +428,9 @@ func (n *Node) handleCoin(evt coinEvt) error {
 			Any("coin", evt.output).
 			Msg("majority decision")
 
-		msg, err := n.makeDecidedMsg()
+		msg, err := n.makeDecidedMsg(*n.decision)
 		if err != nil {
-			return fmt.Errorf("make msg: %w", err)
+			return fmt.Errorf("make decide msg: %w", err)
 		}
 
 		n.rb.Broadcast(n.ctx, msg)
@@ -464,7 +463,7 @@ func (n *Node) handleCoin(evt coinEvt) error {
 
 	msg, err := n.makePhaseMsg()
 	if err != nil {
-		return fmt.Errorf("make msg: %w", err)
+		return fmt.Errorf("make phase msg: %w", err)
 	}
 
 	n.beb.Broadcast(n.ctx, msg)
@@ -542,13 +541,13 @@ func (n *Node) Deliver(msg types.Message) {
 func (n *Node) deliverProposal(msg ProposalMsg) {
 	valObj, err := n.registry.Unmarshal(msg.ValueRaw.Raw, msg.ValueRaw.RawType)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("deliver proposal")
+		n.logger.Error().Err(err).Msg("unmarshal proposal")
 		return
 	}
 
 	val, ok := valObj.(types.Value)
 	if !ok {
-		n.logger.Error().Err(err).Msg("deliver proposal")
+		n.logger.Error().Msg("cast proposal")
 		return
 	}
 
@@ -561,13 +560,13 @@ func (n *Node) deliverPhase(msg PhaseMsg) {
 	if msg.ProposalRaw != nil {
 		valObj, err := n.registry.Unmarshal(msg.ProposalRaw.Raw, msg.ProposalRaw.RawType)
 		if err != nil {
-			n.logger.Error().Err(err).Msg("deliver proposal")
+			n.logger.Error().Err(err).Msg("unmarshal phase")
 			return
 		}
 
 		val, ok := valObj.(types.Value)
 		if !ok {
-			n.logger.Error().Err(err).Msg("deliver proposal")
+			n.logger.Error().Err(err).Msg("cast phase")
 			return
 		}
 		value = &val
@@ -584,13 +583,13 @@ func (n *Node) deliverPhase(msg PhaseMsg) {
 func (n *Node) deliverDecide(msg DecidedMsg) {
 	valObj, err := n.registry.Unmarshal(msg.DecidedRaw.Raw, msg.DecidedRaw.RawType)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("deliver proposal")
+		n.logger.Error().Err(err).Msg("unmarshal decide")
 		return
 	}
 
 	val, ok := valObj.(types.Value)
 	if !ok {
-		n.logger.Error().Err(err).Msg("deliver proposal")
+		n.logger.Error().Err(err).Msg("cast decide")
 		return
 	}
 
@@ -647,8 +646,8 @@ func (n *Node) makePhaseMsg() (types.Message, error) {
 	return msg, nil
 }
 
-func (n *Node) makeDecidedMsg() (types.Message, error) {
-	raw, err := n.registry.Marshal(n.decided)
+func (n *Node) makeDecidedMsg(val types.Value) (types.Message, error) {
+	raw, err := n.registry.Marshal(val)
 	if err != nil {
 		return nil, fmt.Errorf("marshal msg: %w", err)
 	}
@@ -659,4 +658,11 @@ func (n *Node) makeDecidedMsg() (types.Message, error) {
 	}
 
 	return msg, nil
+}
+
+func (n *Node) registerCodec() {
+	codec.RegisterTyped[ProposalMsg](n.registry)
+	codec.RegisterTyped[DecidedMsg](n.registry)
+	codec.RegisterTyped[PhaseMsg](n.registry)
+	types.RegisterIntValue(n.registry)
 }

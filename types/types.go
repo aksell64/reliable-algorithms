@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"reliable/utils/codec"
 	"strconv"
 	"sync"
 
@@ -47,47 +48,51 @@ type Value interface {
 
 func IntValue(i int) Value {
 	v := intValue(i)
-	return &v
+	return v
 }
 
 type intValue int
 
-func (v *intValue) Type() string {
+func (v intValue) Type() string {
 	return "intValue"
 }
 
-func (v *intValue) String() string {
-	return strconv.Itoa(int(*v))
+func (v intValue) String() string {
+	return strconv.Itoa(int(v))
 }
 
-func (v *intValue) Copy() Value {
-	vv := *v
+func (v intValue) Copy() Value {
+	vv := v
 	return &vv
 }
 
-func (v *intValue) Compare(other Value) bool {
-	ov, ok := other.(*intValue)
+func (v intValue) Compare(other Value) bool {
+	ov, ok := other.(intValue)
 	if !ok {
 		return false
 	}
 	return v == ov
 }
 
-func (v *intValue) Less(other Value) bool {
-	ov, ok := other.(*intValue)
+func (v intValue) Less(other Value) bool {
+	ov, ok := other.(intValue)
 	if !ok {
 		return false
 	}
 
-	return *v < *ov
+	return v < ov
 }
 
-func (v *intValue) Bytes() ([]byte, error) {
-	return json.Marshal(*v)
+func (v intValue) Bytes() ([]byte, error) {
+	return json.Marshal(v)
 }
 
-func (v *intValue) FromBytes(data []byte) error {
-	return json.Unmarshal(data, v)
+func RegisterIntValue(r *codec.Registry) {
+	v := new(intValue)
+	r.Register(v.Type(), func() any {
+		v := new(intValue)
+		return v
+	})
 }
 
 type Message interface {
