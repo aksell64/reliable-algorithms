@@ -196,10 +196,7 @@ type Typed interface {
 
 func RegisterTyped[D Typed](r Registerer) {
 	var d D
-	r.Register(d.Type(), func() any {
-		var out D
-		return &out
-	})
+	Register[D](r, d.Type())
 }
 
 // Make initializes the data that is registered under the given name.

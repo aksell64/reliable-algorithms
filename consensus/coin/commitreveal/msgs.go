@@ -2,7 +2,12 @@ package commitreveal
 
 import (
 	"reliable/messages"
-	"reliable/types"
+)
+
+const (
+	CommitMsgName = "commit"
+	RevealMsgName = "reveal"
+	SchemeMsgName = "cr_scheme"
 )
 
 type CommitMsg struct {
@@ -10,14 +15,26 @@ type CommitMsg struct {
 	Commit []byte
 }
 
+func (msg CommitMsg) Type() string {
+	return CommitMsgName
+}
+
 type RevealMsg struct {
 	messages.BaseMsg
-	Value types.Value
-	Salt  []byte
+	ValueRaw messages.RawMsg
+	Salt     []byte
+}
+
+func (msg RevealMsg) Type() string {
+	return RevealMsgName
 }
 
 type SchemeMsg struct {
 	messages.BaseMsg
-	Inner types.Message
-	Ts    int
+	messages.RawMsg
+	Ts int
+}
+
+func (msg SchemeMsg) Type() string {
+	return SchemeMsgName
 }

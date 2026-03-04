@@ -12,11 +12,14 @@ const (
 )
 
 type BiasedLocalRand struct {
+	types.Deliverer
 	receiver coin.Receiver
 }
 
-func NewBiasedLocalRandCoin() *BiasedLocalRand {
-	cc := &BiasedLocalRand{}
+func NewBiasedLocalRandCoin(pid types.ProcessID) *BiasedLocalRand {
+	cc := &BiasedLocalRand{
+		Deliverer: types.NewUnaryDeliverer(pid),
+	}
 
 	return cc
 }

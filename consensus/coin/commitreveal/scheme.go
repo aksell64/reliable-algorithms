@@ -15,13 +15,19 @@ import (
 	"reliable/types"
 	"reliable/types/fsm"
 	"reliable/utils"
+	"reliable/utils/codec"
 	"slices"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
-type Scheme struct {
+type reveal struct {
+	value types.Value
+	salt  []byte
+}
+
+type scheme struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	self             types.ProcessID
@@ -35,14 +41,16 @@ type Scheme struct {
 	value            types.Value
 	values           map[types.ProcessID]types.Value
 	commits          map[types.ProcessID][]byte
+	pendingReveals   map[types.ProcessID]reveal
 	evts             chan fsm.Event
 	output           chan types.Value
 	stopCh           chan struct{}
+	registry         *codec.Registry
 	beb              broadcaster.Broadcaster
 	logger           zerolog.Logger
 }
 
-func StartScheme(
+func startScheme(
 	ctx context.Context,
 	self types.ProcessID,
 	ts int,
@@ -51,8 +59,9 @@ func StartScheme(
 	domain []types.Value,
 	beb broadcaster.Broadcaster,
 	logger *zerolog.Logger,
-) *Scheme {
-	c := makeScheme(ctx, self, ts, processes, crashFaultsCount, domain, beb, logger)
+	registry *codec.Registry,
+) *scheme {
+	c := makeScheme(ctx, self, ts, processes, crashFaultsCount, domain, beb, logger, registry)
 	c.start()
 	return c
 }
@@ -65,8 +74,9 @@ func makeScheme(ctx context.Context,
 	domain []types.Value,
 	beb broadcaster.Broadcaster,
 	logger *zerolog.Logger,
-) *Scheme {
-	c := new(Scheme)
+	registry *codec.Registry,
+) *scheme {
+	c := new(scheme)
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.self = self
 	c.id = ts
@@ -79,6 +89,10 @@ func makeScheme(ctx context.Context,
 	c.crashFaultsCount = crashFaultsCount
 	c.processesCount = len(processes)
 	c.hasher = sha256.New()
+	c.output = make(chan types.Value, 1)
+	c.stopCh = make(chan struct{})
+	c.pendingReveals = make(map[types.ProcessID]reveal)
+	c.registry = registry
 
 	if logger != nil {
 		c.logger = *logger
@@ -86,12 +100,12 @@ func makeScheme(ctx context.Context,
 	return c
 }
 
-func (c *Scheme) start() {
+func (c *scheme) start() {
 	c.triggerEvt(commitEvt{})
 	go c.eventLoop()
 }
 
-func (c *Scheme) eventLoop() {
+func (c *scheme) eventLoop() {
 	defer close(c.stopCh)
 	for c.ctx.Err() == nil {
 		select {
@@ -106,13 +120,12 @@ func (c *Scheme) eventLoop() {
 	}
 }
 
-func (c *Scheme) handleEvent(event fsm.Event) error {
+func (c *scheme) handleEvent(event fsm.Event) error {
 	switch evt := event.(type) {
 	case commitEvt:
 		return c.commit()
 	case commitedEvt:
-		c.onCommit(evt.from, evt.commit)
-		return nil
+		return c.onCommit(evt.from, evt.commit)
 	case revealEvt:
 		return c.onReveal(evt.from, evt.value, evt.salt)
 	default:
@@ -120,20 +133,35 @@ func (c *Scheme) handleEvent(event fsm.Event) error {
 	}
 }
 
-func (c *Scheme) onCommit(from types.ProcessID, commit []byte) {
+func (c *scheme) onCommit(from types.ProcessID, commit []byte) error {
 	c.commits[from] = commit
+	if reveal, existsReveal := c.pendingReveals[from]; existsReveal {
+		go c.triggerEvt(revealEvt{
+			BaseEvent: fsm.NewBaseEvent("reveal"),
+			from:      from,
+			value:     reveal.value,
+			salt:      reveal.salt,
+		})
+	}
 
 	if len(c.commits) >= c.processesCount-c.crashFaultsCount {
-		msg := RevealMsg{
-			BaseMsg: messages.NewBase(uuid.New(), c.self, "reveal"),
-			Value:   c.value,
-			Salt:    c.salt,
+		rawValue, err := c.registry.Marshal(c.value)
+		if err != nil {
+			return fmt.Errorf("marshaling reveal value: %w", err)
 		}
-		c.broadcast(msg)
+
+		msg := RevealMsg{
+			BaseMsg:  messages.NewBase(uuid.New(), c.self, RevealMsgName),
+			ValueRaw: messages.NewRaw(rawValue, c.value.Type()),
+			Salt:     c.salt,
+		}
+		return c.broadcast(msg)
 	}
+
+	return nil
 }
 
-func (c *Scheme) commit() error {
+func (c *scheme) commit() error {
 	salt := c.genSalt()
 	c.salt = salt
 	value := c.randValueFromDomain()
@@ -145,16 +173,16 @@ func (c *Scheme) commit() error {
 	}
 
 	msg := CommitMsg{
-		BaseMsg: messages.NewBase(uuid.New(), c.self, "commit"),
+		BaseMsg: messages.NewBase(uuid.New(), c.self, CommitMsgName),
 		Commit:  commit,
 	}
 
-	c.broadcast(msg)
+	c.logger.Info().Str("val", value.String()).Bytes("salt", salt[:5]).Msg("commit")
 
-	return nil
+	return c.broadcast(msg)
 }
 
-func (c *Scheme) onReveal(from types.ProcessID, val types.Value, salt []byte) error {
+func (c *scheme) onReveal(from types.ProcessID, val types.Value, salt []byte) error {
 	_, exists := c.processes[from]
 	if !exists {
 		return fmt.Errorf("undefined process: %s", from.String())
@@ -162,7 +190,11 @@ func (c *Scheme) onReveal(from types.ProcessID, val types.Value, salt []byte) er
 
 	receivedCommit, ok := c.commits[from]
 	if !ok {
-		return fmt.Errorf("no commit for process: %s", from.String())
+		c.pendingReveals[from] = reveal{
+			salt:  salt,
+			value: val,
+		}
+		return fmt.Errorf("no commit for process: %s, save to pending", from.String())
 	}
 
 	commit, err := c.buildCommit(val, salt)
@@ -176,6 +208,13 @@ func (c *Scheme) onReveal(from types.ProcessID, val types.Value, salt []byte) er
 
 	c.values[from] = val
 
+	c.logger.Info().
+		Str("val", val.String()).
+		Bytes("salt", salt[:5]).
+		Int("count received", len(c.values)).
+		Int("need", c.processesCount-c.crashFaultsCount).
+		Msg("reveal received")
+
 	if len(c.values) >= c.processesCount-c.crashFaultsCount {
 		val, err := c.aggregate()
 		if err != nil {
@@ -187,13 +226,13 @@ func (c *Scheme) onReveal(from types.ProcessID, val types.Value, salt []byte) er
 	return nil
 }
 
-func (c *Scheme) aggregate() (types.Value, error) {
-	initVal := 1 << 8
-	initValBytes := make([]byte, 512)
-	binary.BigEndian.PutUint64(initValBytes, uint64(initVal))
+func (c *scheme) aggregate() (types.Value, error) {
+	var initVal uint64 = 1<<64 - 1
+	initValBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(initValBytes, initVal)
 
 	values := utils.ValuesSlice(c.values)
-	slices.SortFunc(values, func(a, b types.Value) int {
+	slices.SortStableFunc(values, func(a, b types.Value) int {
 		if a.Compare(b) {
 			return 0
 		}
@@ -211,15 +250,16 @@ func (c *Scheme) aggregate() (types.Value, error) {
 		initValBytes = utils.XORBytes(initValBytes, raw)
 	}
 
-	res := int(binary.BigEndian.Uint32(initValBytes))
+	resIdx := binary.BigEndian.Uint64(initValBytes) % uint64(len(values))
 
-	valuesCount := len(values)
-	resIdx := res % valuesCount
+	result := values[resIdx]
 
-	return values[resIdx], nil
+	c.logger.Info().Str("result", result.String()).Msg("aggregate")
+
+	return result, nil
 }
 
-func (c *Scheme) buildCommit(val types.Value, salt []byte) ([]byte, error) {
+func (c *scheme) buildCommit(val types.Value, salt []byte) ([]byte, error) {
 	defer c.hasher.Reset()
 	rawValue, err := val.Bytes()
 	if err != nil {
@@ -232,25 +272,25 @@ func (c *Scheme) buildCommit(val types.Value, salt []byte) ([]byte, error) {
 	return commit, err
 }
 
-func (c *Scheme) triggerEvt(evt fsm.Event) {
+func (c *scheme) triggerEvt(evt fsm.Event) {
 	select {
 	case c.evts <- evt:
 	case <-c.ctx.Done():
 	}
 }
 
-func (c *Scheme) genSalt() []byte {
+func (c *scheme) genSalt() []byte {
 	b := make([]byte, 256)
 	_, _ = rand.Read(b)
 	return b
 }
 
-func (c *Scheme) randValueFromDomain() types.Value {
+func (c *scheme) randValueFromDomain() types.Value {
 	randomIndex := mrand.Int32N(int32(len(c.domain)))
 	return c.domain[randomIndex]
 }
 
-func (c *Scheme) Deliver(msg types.Message) {
+func (c *scheme) Deliver(msg types.Message) {
 	switch m := msg.(type) {
 	case CommitMsg:
 		go c.triggerEvt(commitedEvt{
@@ -259,26 +299,45 @@ func (c *Scheme) Deliver(msg types.Message) {
 			from:      m.From(),
 		})
 	case RevealMsg:
+		valueObj, err := c.registry.Unmarshal(m.ValueRaw.Raw, m.ValueRaw.RawType)
+		if err != nil {
+			c.logger.Error().Err(err).Msg("unmarshal reveal value")
+			return
+		}
+
+		value, ok := valueObj.(types.Value)
+		if !ok {
+			c.logger.Error().Err(err).Msg("cast reveal value")
+			return
+		}
+
 		go c.triggerEvt(revealEvt{
 			BaseEvent: fsm.NewBaseEvent("reveal"),
 			from:      m.From(),
-			value:     m.Value,
+			value:     value,
 			salt:      m.Salt,
 		})
 	}
 }
 
-func (c *Scheme) broadcast(msg types.Message) {
+func (c *scheme) broadcast(msg types.Message) error {
+	raw, err := c.registry.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal msg: %w", err)
+	}
+
 	schemeMsg := SchemeMsg{
-		BaseMsg: messages.NewBase(uuid.New(), c.self, "commit_scheme"),
+		BaseMsg: messages.NewBase(uuid.New(), c.self, SchemeMsgName),
 		Ts:      c.id,
-		Inner:   msg,
+		RawMsg:  messages.NewRaw(raw, msg.Type()),
 	}
 
 	c.beb.Broadcast(c.ctx, schemeMsg)
+
+	return nil
 }
 
-func (c *Scheme) sendOutput(v types.Value) {
+func (c *scheme) sendOutput(v types.Value) {
 	defer close(c.output)
 	defer c.cancel()
 

@@ -158,7 +158,7 @@ func (n *Node) background() {
 	defer drainPendingPhaseTimer.Stop()
 	cooldownInterval := 50 * time.Millisecond
 
-	for n.ctx.Err() == nil {
+	for {
 		select {
 		case <-n.ctx.Done():
 			return

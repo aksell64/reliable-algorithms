@@ -6,10 +6,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	ReliableBroadcastMessageName = "reliable_broadcast"
-)
-
 type Ack struct {
 	types.Message
 }

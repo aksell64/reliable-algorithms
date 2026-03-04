@@ -3,18 +3,21 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"reliable/broadcaster"
 	"reliable/consensus"
-	"reliable/consensus/coin/simple"
+	"reliable/consensus/coin/commitreveal"
 	"reliable/consensus/failsilent/randomized"
+	"reliable/database"
 	"reliable/messages"
 	"reliable/network"
 	"reliable/p2p"
 	"reliable/types"
+	"reliable/types/inbox"
 	"reliable/utils"
 	"reliable/utils/codec"
 	"strconv"
@@ -112,37 +115,36 @@ func makeConsensus(
 
 	rb := broadcaster.NewEagerReliableBroadcaster(ctx, pid, processes, beb1, registry)
 
-	//hasher := sha256.New()
+	hasher := sha256.New()
 
 	codec.RegisterTyped[messages.BaseMsg](registry)
 
-	//storage := database.NewInMemory()
+	storage := database.NewInMemory()
 
-	//ibox := inbox.New(registry, storage)
+	ibox := inbox.New(registry, storage)
 
-	//coin := commitreveal.NewCoin(
-	//	ctx,
-	//	pid,
-	//	hasher,
-	//	processes,
-	//	len(processes),
-	//	crashFaults,
-	//	beb2,
-	//	ibox,
-	//	registry,
-	//	nil,
-	//)
+	coin := commitreveal.NewCoin(
+		ctx,
+		pid,
+		hasher,
+		processes,
+		len(processes),
+		crashFaults,
+		beb2,
+		ibox,
+		registry,
+		utils.Ptr(zerolog.Nop()),
+	)
 
-	coin := simple.NewBiasedLocalRandCoin()
-
-	node := randomized.New(ctx, processes, pid, crashFaults, coin, beb2, rb, utils.Ptr(zerolog.Nop()), registry)
+	node := randomized.New(ctx, processes, pid, crashFaults, coin, beb2, rb, nil, registry)
 	return node
 }
 
 func setupLAN(listenAddr string, processID types.ProcessID, N int, registry *codec.Registry) (network.Network, error) {
 	net := network.NewLibp2p([]string{listenAddr}, processID, N,
 		network.WithRegistry(registry),
-		network.DisableLogger())
+		network.WithIdentityFile(fmt.Sprintf("./node_identity%s.json", processID.String())),
+		/*network.DisableLogger()*/)
 
 	network.SetGlobal(net)
 	return net, nil

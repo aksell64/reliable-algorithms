@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"reliable/broadcaster"
 	"reliable/consensus"
-	"reliable/consensus/coin/simple"
+	"reliable/consensus/coin/commitreveal"
 	"reliable/consensus/failsilent/randomized"
+	"reliable/database"
 	"reliable/messages"
 	"reliable/p2p"
 	"reliable/types"
+	"reliable/types/inbox"
 	"reliable/utils"
 	"reliable/utils/codec"
 )
@@ -65,28 +68,26 @@ func makeConsensus(
 
 	rb := broadcaster.NewEagerReliableBroadcaster(ctx, pid, processes, beb1, registry)
 
-	//hasher := sha256.New()
+	hasher := sha256.New()
 
 	codec.RegisterTyped[messages.BaseMsg](registry)
 
-	//storage := database.NewInMemory()
+	storage := database.NewInMemory()
 
-	//ibox := inbox.New(registry, storage)
+	ibox := inbox.New(registry, storage)
 
-	//coin := commitreveal.NewCoin(
-	//	ctx,
-	//	pid,
-	//	hasher,
-	//	processes,
-	//	len(processes),
-	//	crashFaults,
-	//	beb2,
-	//	ibox,
-	//	registry,
-	//	nil,
-	//)
-
-	coin := simple.NewBiasedLocalRandCoin()
+	coin := commitreveal.NewCoin(
+		ctx,
+		pid,
+		hasher,
+		processes,
+		len(processes),
+		crashFaults,
+		beb2,
+		ibox,
+		registry,
+		nil,
+	)
 
 	node := randomized.New(ctx, processes, pid, crashFaults, coin, beb2, rb, nil, registry)
 	return node

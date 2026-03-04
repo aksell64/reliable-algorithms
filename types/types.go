@@ -1,7 +1,7 @@
 package types
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"reliable/utils/codec"
 	"strconv"
 	"sync"
@@ -51,7 +51,7 @@ func IntValue(i int) Value {
 	return v
 }
 
-type intValue int
+type intValue int64
 
 func (v intValue) Type() string {
 	return "intValue"
@@ -84,15 +84,13 @@ func (v intValue) Less(other Value) bool {
 }
 
 func (v intValue) Bytes() ([]byte, error) {
-	return json.Marshal(v)
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b, nil
 }
 
 func RegisterIntValue(r *codec.Registry) {
-	v := new(intValue)
-	r.Register(v.Type(), func() any {
-		v := new(intValue)
-		return v
-	})
+	codec.RegisterTyped[intValue](r)
 }
 
 type Message interface {

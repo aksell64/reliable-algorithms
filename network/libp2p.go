@@ -2,10 +2,13 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"reliable/logger"
 	"reliable/messages"
 	"reliable/types"
@@ -17,10 +20,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/multiformats/go-multiaddr"
@@ -38,6 +43,55 @@ const (
 	msgType                 = "libp2p_msg"
 	clusterHandshakeTimeout = 5 * 30 * time.Second
 )
+
+// Файл хранит приватный ключ в base64-encoded protobuf (стандарт libp2p)
+type identityFile struct {
+	PrivKeyBytes []byte `json:"priv_key"` // crypto.MarshalPrivateKey result
+}
+
+func loadOrCreateIdentity(path string) (crypto.PrivKey, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		// Файл есть — десериализуем
+		var id identityFile
+		if err := json.Unmarshal(data, &id); err != nil {
+			return nil, fmt.Errorf("parse identity file %s: %w", path, err)
+		}
+		priv, err := crypto.UnmarshalPrivateKey(id.PrivKeyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal private key from %s: %w", path, err)
+		}
+		return priv, nil
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read identity file %s: %w", path, err)
+	}
+
+	// Файла нет — генерим новый Ed25519 ключ
+	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+
+	// Сериализуем и сохраняем
+	raw, err := crypto.MarshalPrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private key: %w", err)
+	}
+
+	id := identityFile{PrivKeyBytes: raw}
+	fileData, err := json.Marshal(id)
+	if err != nil {
+		return nil, fmt.Errorf("marshal identity file: %w", err)
+	}
+
+	if err := os.WriteFile(path, fileData, 0600); err != nil {
+		return nil, fmt.Errorf("write identity file %s: %w", path, err)
+	}
+
+	return priv, nil
+}
 
 type Libp2pMessage struct {
 	messages.BaseMsg
@@ -96,6 +150,8 @@ type libp2pNetwork struct {
 	// Трекер: кому мы уже отправляли handshake
 	handshakeSent map[peer.ID]bool
 
+	identityKeyPath string // путь к файлу с ключом (пусто = рандом каждый раз)
+
 	logger *zerolog.Logger
 
 	mu sync.RWMutex
@@ -133,6 +189,14 @@ func DisableLogger() Libp2pOption {
 	}
 }
 
+// WithIdentityFile — опция: если файл есть — читаем ключ,
+// если файла нет — генерим Ed25519, сохраняем, используем.
+func WithIdentityFile(path string) Libp2pOption {
+	return func(n *libp2pNetwork) {
+		n.identityKeyPath = path
+	}
+}
+
 // NewLibp2p создаёт p2p ноду.
 // localPID — ProcessID этой ноды.
 // clusterN — общее число процессов в кластере.
@@ -153,27 +217,8 @@ func NewLibp2p(
 		maddrs = append(maddrs, ma)
 	}
 
-	h, err := libp2p.New(
-		libp2p.ListenAddrs(maddrs...),
-	)
-	if err != nil {
-		logger.Panicfmt("failed to create libp2p host: %v", err)
-	}
-
-	// Создаём Kademlia DHT
-	kdht, err := dht.New(ctx, h, dht.Mode(dht.ModeAutoServer))
-	if err != nil {
-		logger.Panicfmt("failed to create DHT: %v", err)
-	}
-
-	// Bootstrap DHT
-	if err := kdht.Bootstrap(ctx); err != nil {
-		logger.Panicfmt("failed to bootstrap DHT: %v", err)
-	}
-
+	// Создаём "пустой" объект, чтобы опции могли записать identityKeyPath
 	n := &libp2pNetwork{
-		host:          h,
-		kdht:          kdht,
 		ctx:           ctx,
 		cancel:        cancel,
 		localPID:      localPID,
@@ -188,9 +233,46 @@ func NewLibp2p(
 		allReady:      make(chan struct{}),
 	}
 
+	// Применяем опции ПЕРВЫМ делом — чтобы identityKeyPath был заполнен
+	for _, opt := range opts {
+		opt(n)
+	}
+
+	// Собираем libp2p.Option для хоста
+	hostOpts := []libp2p.Option{
+		libp2p.ListenAddrs(maddrs...),
+	}
+
+	// Если указан путь к identity-файлу — грузим/создаём ключ
+	if n.identityKeyPath != "" {
+		privKey, err := loadOrCreateIdentity(n.identityKeyPath)
+		if err != nil {
+			logger.Panicfmt("identity key: %v", err)
+		}
+		hostOpts = append(hostOpts, libp2p.Identity(privKey))
+	}
+
+	h, err := libp2p.New(hostOpts...)
+	if err != nil {
+		logger.Panicfmt("failed to create libp2p host: %v", err)
+	}
+
+	n.host = h
+
+	// Создаём Kademlia DHT
+	kdht, err := dht.New(ctx, h, dht.Mode(dht.ModeAutoServer))
+	if err != nil {
+		logger.Panicfmt("failed to create DHT: %v", err)
+	}
+	n.kdht = kdht
+
+	if err := kdht.Bootstrap(ctx); err != nil {
+		logger.Panicfmt("failed to bootstrap DHT: %v", err)
+	}
+
 	n.Deliverer = types.NewUnaryDeliverer(localPID)
 
-	// Регистрируем себя в маппинге
+	// Регистрируем себя
 	n.peerToPID[h.ID()] = localPID
 	n.pidToPeer[localPID] = h.ID()
 
@@ -272,6 +354,11 @@ func NewLibp2p(
 
 	// Запускаем discovery в фоне
 	go n.discoverPeers()
+
+	mdnsService := mdns.NewMdnsService(h, Rendezvous, &mdnsNotifee{n: n})
+	if err := mdnsService.Start(); err != nil {
+		n.logger.Error().Err(err).Msg("mDNS start failed")
+	}
 
 	return n
 }
@@ -610,17 +697,6 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 		return
 	}
 
-	wire := wireMessage{
-		FromPID: from,
-		ToPID:   to,
-		Payload: json.RawMessage(payload),
-	}
-	data, err := json.Marshal(wire)
-	if err != nil {
-		n.logger.Error().Err(err).Msg("wire marshal msg")
-		return
-	}
-
 	// Ищем peer.ID по ProcessID — динамически!
 	n.mu.RLock()
 	peerID, ok := n.pidToPeer[to]
@@ -630,6 +706,17 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 		n.logger.Error().Err(err).
 			Str("peer", peerID.String()).
 			Msg("no peer found for PID (cluster not ready?)")
+		return
+	}
+
+	wire := wireMessage{
+		FromPID: from,
+		ToPID:   to,
+		Payload: json.RawMessage(payload),
+	}
+	data, err := json.Marshal(wire)
+	if err != nil {
+		n.logger.Error().Err(err).Msg("wire marshal msg")
 		return
 	}
 
@@ -643,7 +730,6 @@ func (n *libp2pNetwork) sendToPeerByID(peerID peer.ID, data []byte) {
 		defer cancel()
 		peerInfo := n.host.Peerstore().PeerInfo(peerID)
 		if err := n.host.Connect(ctx, peerInfo); err != nil {
-			//fmt.Printf("[libp2p] reconnect failed to %s: %v\n", peerID, err)
 			return
 		}
 	}
@@ -675,6 +761,28 @@ func (n *libp2pNetwork) Close() error {
 
 func (n *libp2pNetwork) Host() host.Host {
 	return n.host
+}
+
+// Реализуем интерфейс mdns.Notifee
+type mdnsNotifee struct {
+	n *libp2pNetwork
+}
+
+func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
+	if pi.ID == m.n.host.ID() {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(m.n.ctx, streamOpenTimeout)
+	defer cancel()
+
+	if err := m.n.host.Connect(ctx, pi); err != nil {
+		m.n.logger.Error().Err(err).Str("peer", pi.ID.String()).Msg("mdns connect failed")
+		return
+	}
+
+	m.n.logger.Info().Str("peer", pi.ID.String()).Msg("mDNS: found peer, sending handshake")
+	m.n.sendHandshake(pi.ID)
 }
 
 // --- Length-prefixed framing ---

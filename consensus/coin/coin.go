@@ -7,6 +7,7 @@ type Receiver interface {
 }
 
 type TsCoinScheme interface {
+	types.Deliverer
 	RunScheme(ts int, domain []types.Value)
 	SetReceiver(r Receiver)
 }
