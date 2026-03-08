@@ -501,7 +501,7 @@ func TestAbort_PreservesState(t *testing.T) {
 	leaderID := processes[0]
 
 	initialVal := types.IntValue(555)
-	initialState := State{ts: 3, val: utils.Ptr(initialVal)}
+	initialState := State{Ts: 3, Val: utils.Ptr(initialVal)}
 
 	for _, ec := range ecs {
 		ec.StartEpoch(ctx, leaderID, 7, initialState)
@@ -528,9 +528,9 @@ func TestAbort_PreservesState(t *testing.T) {
 	// Может быть ok=false (closed), но первое чтение должно быть значением
 	assert.Equal(t, 7, abortedState.Ts)
 	require.NotNil(t, abortedState.State)
-	assert.Equal(t, 3, abortedState.State.ts)
-	require.NotNil(t, abortedState.State.val)
-	assert.True(t, (*abortedState.State.val).Compare(initialVal))
+	assert.Equal(t, 3, abortedState.State.Ts)
+	require.NotNil(t, abortedState.State.Val)
+	assert.True(t, (*abortedState.State.Val).Compare(initialVal))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -617,8 +617,8 @@ func testOnInit(t *testing.T, instancesCount int) {
 
 	runEachInstance(t, "nozero state", instancesCount, func(self *instance, instances []*instance) {
 		state := State{
-			ts:  5,
-			val: utils.Ptr(types.IntValue(10)),
+			Ts:  5,
+			Val: utils.Ptr(types.IntValue(10)),
 		}
 		leader := instances[0]
 		testOnInitApply(t, leader.ProcessID(), 0, state, self, instances)
@@ -640,8 +640,8 @@ func testOnInitApply(t *testing.T, leader types.ProcessID, ets int, state State,
 	assert.Equal(t, instance.epochTs, ets)
 	assert.Equal(t, instance.leader, leader)
 
-	assert.Equal(t, instance.current.ts, state.ts)
-	assert.Equal(t, instance.current.val, state.val)
+	assert.Equal(t, instance.current.Ts, state.Ts)
+	assert.Equal(t, instance.current.Val, state.Val)
 
 	if evt.leader == instance.ProcessID() {
 		assert.Equal(t, instance.sm.Current(), StatePropose)

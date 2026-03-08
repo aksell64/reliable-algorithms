@@ -152,6 +152,8 @@ type libp2pNetwork struct {
 
 	identityKeyPath string // путь к файлу с ключом (пусто = рандом каждый раз)
 
+	identify types.Identify
+
 	logger *zerolog.Logger
 
 	mu sync.RWMutex
@@ -360,7 +362,13 @@ func NewLibp2p(
 		n.logger.Error().Err(err).Msg("mDNS start failed")
 	}
 
+	n.identify = NewLibp2pIdentify(h, n)
+
 	return n
+}
+
+func (n *libp2pNetwork) Identify() types.Identify {
+	return n.identify
 }
 
 func (n *libp2pNetwork) boostrapConnect(p peer.AddrInfo) {
@@ -783,6 +791,13 @@ func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 
 	m.n.logger.Info().Str("peer", pi.ID.String()).Msg("mDNS: found peer, sending handshake")
 	m.n.sendHandshake(pi.ID)
+}
+
+func (n *libp2pNetwork) PeerIDByProcess(pid types.ProcessID) (peer.ID, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	peerID, ok := n.pidToPeer[pid]
+	return peerID, ok
 }
 
 // --- Length-prefixed framing ---

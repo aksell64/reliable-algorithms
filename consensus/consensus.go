@@ -40,6 +40,10 @@ func (s minSelector) Select(values []types.Value) types.Value {
 	return minVal
 }
 
+type EpochStarter interface {
+	StartEpoch(ts int, leader types.ProcessID)
+}
+
 type Decided struct {
 	ProcessID types.ProcessID
 	Value     types.Value

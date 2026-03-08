@@ -149,15 +149,12 @@ func (c *Coin) Deliver(msg types.Message) {
 	case smsg.Ts == c.ts && c.current == nil:
 		saveToInbox()
 		c.mu.Unlock()
-
 	case smsg.Ts > c.ts:
 		saveToInbox()
 		c.mu.Unlock()
-
 	case smsg.Ts == c.ts && c.current != nil:
 		c.mu.Unlock()
 		c.current.Deliver(inner)
-
 	default:
 		c.logger.Warn().Msg("dropped msg")
 	}

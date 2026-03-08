@@ -161,3 +161,8 @@ func (w *WorkerOnce) Start(f func()) {
 func (w *WorkerOnce) Stop(f func()) {
 	w.stopOnce.Do(f)
 }
+
+type Identify interface {
+	Sign(raw []byte) ([]byte, error)
+	Verify(from ProcessID, raw []byte, signature []byte) error
+}

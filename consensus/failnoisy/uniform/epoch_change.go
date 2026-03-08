@@ -3,6 +3,7 @@ package uniform
 import (
 	"context"
 	"reliable/broadcaster"
+	"reliable/consensus"
 	"reliable/election"
 	"reliable/logger"
 	"reliable/messages"
@@ -26,14 +27,10 @@ const (
 	bcastNewEpochMaxDebounceInterval = bcastNewEpochDebounceInterval * 4
 )
 
-type EpochStarter interface {
-	StartEpoch(ts int, leader types.ProcessID)
-}
-
 type LeaderBasedEpochChanger struct {
 	types.Deliverer
 	ctx             context.Context
-	starter         EpochStarter
+	starter         consensus.EpochStarter
 	trusted         types.ProcessID
 	lastTs          int
 	self            types.ProcessID
@@ -118,7 +115,7 @@ func (ec *LeaderBasedEpochChanger) Stop() {
 	})
 }
 
-func (ec *LeaderBasedEpochChanger) SetEpochStarter(starter EpochStarter) {
+func (ec *LeaderBasedEpochChanger) SetEpochStarter(starter consensus.EpochStarter) {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
 	ec.starter = starter

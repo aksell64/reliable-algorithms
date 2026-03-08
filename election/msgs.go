@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+const (
+	ComplainMsgName = "complain"
+)
+
 type HeartbeatMessage struct {
 	messages.BaseMsg
 	Epoch  int
@@ -13,4 +17,13 @@ type HeartbeatMessage struct {
 
 func (msg HeartbeatMessage) Type() string {
 	return "hb"
+}
+
+type ComplainMsg struct {
+	messages.BaseMsg
+	Round int
+}
+
+func (msg ComplainMsg) Type() string {
+	return ComplainMsgName
 }

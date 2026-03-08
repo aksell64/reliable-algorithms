@@ -34,4 +34,5 @@ type Network interface {
 	Send(from, to types.ProcessID, msg types.Message)
 	Connect(deliverer types.Deliverer)
 	Boostrap() error
+	Identify() types.Identify
 }
