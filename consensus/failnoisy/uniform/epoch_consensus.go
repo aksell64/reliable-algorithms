@@ -137,6 +137,7 @@ func (ec *epochConsensus) decide(val types.Value) {
 func (ec *epochConsensus) doCleanup() {
 	close(ec.aborted)
 	close(ec.decided)
+	close(ec.evts)
 }
 
 func (ec *epochConsensus) Aborted() <-chan AbortedState {

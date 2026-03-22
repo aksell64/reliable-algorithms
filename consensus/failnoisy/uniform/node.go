@@ -16,8 +16,7 @@ import (
 )
 
 const (
-	epochDeadlockCheckInterval = 30 * time.Second
-	proposeInterval            = 100 * time.Millisecond
+	proposeInterval = 100 * time.Millisecond
 )
 
 type newEpochEnvelope struct {

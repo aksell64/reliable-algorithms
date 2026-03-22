@@ -21,8 +21,7 @@ type Registerer interface {
 	Register(string, func() any)
 }
 
-// Registry is a registry of data types. A Registry marshals and unmarshals
-// event data and command payloads.
+// Registry is a registry of data types. A Registry marshals and unmarshals msgs
 type Registry struct {
 	mux              sync.RWMutex
 	factories        map[string]func() any
@@ -193,6 +192,8 @@ func Register[D any](r Registerer, name string) {
 type Typed interface {
 	Type() string
 }
+
+var UndefinedType = "undefined"
 
 func RegisterTyped[D Typed](r Registerer) {
 	var d D

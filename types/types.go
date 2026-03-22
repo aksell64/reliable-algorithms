@@ -123,20 +123,34 @@ type Worker interface {
 }
 
 func InitWorkers(workers ...Worker) {
-	for _, w := range workers {
-		w.Init()
-	}
+	Workers(workers).Init()
 }
 
 func StartWorkers(workers ...Worker) {
-	for _, w := range workers {
-		w.Start()
-	}
+	Workers(workers).Start()
 }
 
 func StopWorkers(workers ...Worker) {
-	for _, w := range workers {
-		w.Stop()
+	Workers(workers).Stop()
+}
+
+type Workers []Worker
+
+func (w Workers) Init() {
+	for _, work := range w {
+		work.Init()
+	}
+}
+
+func (w Workers) Start() {
+	for _, work := range w {
+		work.Start()
+	}
+}
+
+func (w Workers) Stop() {
+	for _, work := range w {
+		work.Stop()
 	}
 }
 

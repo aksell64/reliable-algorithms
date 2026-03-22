@@ -29,10 +29,10 @@ func buildDelivererConfig(opts []DelivererOption) delivererConfig {
 type Deliverer interface {
 	ID() uuid.UUID
 	ProcessID() ProcessID
-	Instance() string
 	Deliver(msg Message)
 	AddDeliverer(d Deliverer, opts ...DelivererOption)
 	RemoveDeliverer(d Deliverer)
+	Instance() string
 }
 
 type UnimplementedDeliverer struct {

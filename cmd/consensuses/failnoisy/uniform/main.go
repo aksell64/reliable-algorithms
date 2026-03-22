@@ -5,9 +5,10 @@ import (
 	"reliable/broadcaster"
 	"reliable/consensus"
 	"reliable/consensus/failnoisy/uniform"
-	"reliable/database/inmemory"
+	"reliable/database"
 	"reliable/election"
 	"reliable/p2p"
+	"reliable/utils/codec"
 	"time"
 
 	"reliable/types"
@@ -17,6 +18,7 @@ import (
 func main() {
 
 	ctx := context.Background()
+	registry := codec.New()
 
 	correct := utils.ProcessesIDRange(1, 40)
 	processes := make(map[types.ProcessID]types.ProcessRank)
@@ -27,7 +29,7 @@ func main() {
 	nodes := make([]consensus.Consensus, 0, len(correct))
 
 	for _, pid := range correct {
-		nodes = append(nodes, makeConsensus(ctx, processes, pid))
+		nodes = append(nodes, makeConsensus(ctx, processes, pid, registry))
 	}
 
 	for _, node := range nodes {
@@ -50,6 +52,7 @@ func makeConsensus(
 	ctx context.Context,
 	processes map[types.ProcessID]types.ProcessRank,
 	pid types.ProcessID,
+	registry *codec.Registry,
 ) consensus.Consensus {
 	fl := p2p.NewBaseLink(pid)
 	sl := p2p.NewStubbornP2PLinks(ctx, fl)
@@ -58,8 +61,8 @@ func makeConsensus(
 		utils.KeysSlice(processes),
 		broadcaster.DefaultBroadcastNodeSelector(),
 		pl)
-	store := inmemory.NewKVStore()
-	elect := election.NewLowerEpochElection(ctx, pid, processes, store, fl, 300*time.Millisecond, nil)
+	store := database.NewInMemory()
+	elect := election.NewLowerEpochElection(ctx, pid, processes, store, fl, 300*time.Millisecond, registry, nil)
 	ec := uniform.NewLeaderBasedEpochChanger(ctx, pid, processes, beb, elect, pl, nil)
 	node := uniform.New(ctx, pid, processes, ec, pl, beb)
 	return node

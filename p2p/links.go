@@ -16,18 +16,18 @@ type LinkOpt func(link *BaseLink)
 
 func WithSendSleep(min, max time.Duration) LinkOpt {
 	return func(link *BaseLink) {
-		f := func() {
+		f := baseLinkInterceptor(func() {
 			utils.RandomSleep(min, max)
-		}
+		})
 		link.sendSleepFunc = &f
 	}
 }
 
 func WithDeliverSleep(min, max time.Duration) LinkOpt {
 	return func(link *BaseLink) {
-		f := func() {
+		f := baseLinkInterceptor(func() {
 			utils.RandomSleep(min, max)
-		}
+		})
 		link.deliverSleepFunc = &f
 	}
 }
@@ -38,11 +38,13 @@ func WithNetwork(net network.Network) LinkOpt {
 	}
 }
 
+type baseLinkInterceptor func()
+
 type BaseLink struct {
 	types.Deliverer
 	self             types.ProcessID
-	sendSleepFunc    *func()
-	deliverSleepFunc *func()
+	sendSleepFunc    *baseLinkInterceptor
+	deliverSleepFunc *baseLinkInterceptor
 	net              network.Network
 	once             *types.WorkerOnce
 }

@@ -17,7 +17,7 @@ type newEpochEnvelope struct {
 	epoch int
 }
 
-type epochChanger struct {
+type EpochChanger struct {
 	types.Deliverer
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -37,7 +37,7 @@ type epochChanger struct {
 	stopCh         chan struct{}
 }
 
-func newEpochChanger(
+func NewEpochChanger(
 	ctx context.Context,
 	self types.ProcessID,
 	al p2p.Link,
@@ -45,9 +45,8 @@ func newEpochChanger(
 	detector *election.RotatingByzantineLeaderDetector,
 	faults int,
 	selector LeaderSelector,
-	starter consensus.EpochStarter,
-) *epochChanger {
-	ec := &epochChanger{}
+) *EpochChanger {
+	ec := &EpochChanger{}
 
 	ec.ctx, ec.cancel = context.WithCancel(ctx)
 	ec.self = self
@@ -58,7 +57,6 @@ func newEpochChanger(
 	ec.leaderDetector = detector
 	ec.faults = faults
 	ec.selector = selector
-	ec.starter = starter
 	ec.newEpoches = make(map[types.ProcessID]struct{})
 	ec.newEpochesCh = make(chan newEpochEnvelope, 10)
 	ec.trustedCh = make(chan types.ProcessID, 10)
@@ -67,24 +65,28 @@ func newEpochChanger(
 	return ec
 }
 
-func (ec *epochChanger) Init() {
+func (ec *EpochChanger) SetStarter(starter consensus.EpochStarter) {
+	ec.starter = starter
+}
+
+func (ec *EpochChanger) Init() {
 	leader := ec.selector(ec.lastEpoch, ec.processes)
 	// non-blocking, buffered
 	ec.triggerNewTrust(leader)
 }
 
-func (ec *epochChanger) Start() {
+func (ec *EpochChanger) Start() {
 	go ec.background()
 }
 
-func (ec *epochChanger) Stop() {
+func (ec *EpochChanger) Stop() {
 	ec.cancel()
 	<-ec.stopCh
 	close(ec.newEpochesCh)
 	close(ec.trustedCh)
 }
 
-func (ec *epochChanger) background() {
+func (ec *EpochChanger) background() {
 	defer close(ec.stopCh)
 	for {
 		select {
@@ -106,7 +108,7 @@ func (ec *epochChanger) background() {
 	}
 }
 
-func (ec *epochChanger) checkComplaint() {
+func (ec *EpochChanger) checkComplaint() {
 	if ec.nextEpoch == ec.lastEpoch &&
 		ec.trusted != ec.selector(ec.lastEpoch, ec.processes) {
 		ec.nextEpoch = ec.lastEpoch + 1
@@ -114,7 +116,7 @@ func (ec *epochChanger) checkComplaint() {
 	}
 }
 
-func (ec *epochChanger) checkQuorums() {
+func (ec *EpochChanger) checkQuorums() {
 	count := len(ec.newEpoches)
 
 	if count > ec.faults && ec.nextEpoch == ec.lastEpoch {
@@ -130,14 +132,14 @@ func (ec *epochChanger) checkQuorums() {
 	}
 }
 
-func (ec *epochChanger) triggerNewTrust(trusted types.ProcessID) {
+func (ec *EpochChanger) triggerNewTrust(trusted types.ProcessID) {
 	select {
 	case <-ec.ctx.Done():
 	case ec.trustedCh <- trusted:
 	}
 }
 
-func (ec *epochChanger) triggerNewEpoch(from types.ProcessID, epoch int) {
+func (ec *EpochChanger) triggerNewEpoch(from types.ProcessID, epoch int) {
 	env := newEpochEnvelope{from: from, epoch: epoch}
 	select {
 	case <-ec.ctx.Done():
@@ -145,29 +147,29 @@ func (ec *epochChanger) triggerNewEpoch(from types.ProcessID, epoch int) {
 	}
 }
 
-func (ec *epochChanger) OnNewLeader(leader types.ProcessID) {
+func (ec *EpochChanger) OnNewLeader(leader types.ProcessID) {
 	ec.triggerNewTrust(leader)
 }
 
-func (ec *epochChanger) handleNewEpoch(from types.ProcessID, epoch int) {
+func (ec *EpochChanger) handleNewEpoch(from types.ProcessID, epoch int) {
 	if epoch != ec.lastEpoch+1 {
 		return
 	}
 	ec.newEpoches[from] = struct{}{}
 }
 
-func (ec *epochChanger) broadcastNewEpoch() {
+func (ec *EpochChanger) broadcastNewEpoch() {
 	msg := NewEpochMsg(ec.self, ec.nextEpoch)
 	ec.broadcast(msg)
 }
 
-func (ec *epochChanger) broadcast(msg types.Message) {
+func (ec *EpochChanger) broadcast(msg types.Message) {
 	for _, pid := range ec.processes {
 		ec.al.Send(pid, msg)
 	}
 }
 
-func (ec *epochChanger) Deliver(msg types.Message) {
+func (ec *EpochChanger) Deliver(msg types.Message) {
 	emsg, ok := msg.(EpochMsg)
 	if !ok {
 		return

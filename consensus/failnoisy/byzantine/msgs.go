@@ -11,6 +11,10 @@ const (
 	EpochMsgName       = "epoch"
 	CCSignedMsgName    = "cc_signed"
 	CCCollectedMsgName = "cc_collected"
+	RWStateMsgName     = "rw_state"
+	RWReadMsgName      = "rw_read"
+	RWWriteMsgName     = "rw_write"
+	RWAcceptMsgName    = "rw_accept"
 )
 
 type EpochMsg struct {
@@ -72,4 +76,43 @@ func NewCCCollectedMsg(from types.ProcessID) CCCollectedMsg {
 func (msg CCCollectedMsg) AddMsg(inner CCCollectInner) CCCollectedMsg {
 	msg.Inner = append(msg.Inner, inner)
 	return msg
+}
+
+type RWReadMsg struct {
+	messages.BaseMsg
+}
+
+func NewRwReadMsg(from types.ProcessID) types.Message {
+	return RWReadMsg{
+		BaseMsg: messages.NewBase(uuid.New(), from, RWReadMsgName),
+	}
+}
+
+type RWStateMsg struct {
+	messages.BaseMsg
+	ValueEpoch  int
+	ValueRaw    messages.RawMsg
+	WriteSetRaw []RWSnapshot
+}
+
+type RWSnapshot struct {
+	Epoch    int
+	ValueRaw messages.RawMsg
+}
+
+type RWWriteMsg struct {
+	messages.BaseMsg
+	ValueRaw messages.RawMsg
+}
+
+func NewRWWriteMsg(from types.ProcessID, val messages.RawMsg) RWWriteMsg {
+	return RWWriteMsg{
+		BaseMsg:  messages.NewBase(uuid.New(), from, RWWriteMsgName),
+		ValueRaw: val,
+	}
+}
+
+type RWAcceptMsg struct {
+	messages.BaseMsg
+	ValueRaw messages.RawMsg
 }

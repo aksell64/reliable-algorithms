@@ -18,7 +18,8 @@ type ConditionsCollector interface {
 }
 
 type CollectReceiver interface {
-	OnCollected([]Sent)
+	ValidateCollected([]Sent) error
+	OnCollected([]Sent) error
 }
 
 type Sent struct {
@@ -27,7 +28,9 @@ type Sent struct {
 	Sign   []byte
 }
 
-type OutputPredicate func(sent []Sent) error
+func (s Sent) IsUndefined() bool {
+	return bytes.Equal(s.Msg, UndefinedMsg)
+}
 
 var UndefinedMsg = []byte("undefined")
 
@@ -64,7 +67,6 @@ type collector struct {
 	collectedCh    chan collectedEnvelope
 	faults         int
 	collected      bool
-	predicate      OutputPredicate
 	receiver       CollectReceiver
 	stopCh         chan struct{}
 }
@@ -77,7 +79,6 @@ func NewSignedConditionsCollector(
 	al p2p.Link,
 	leader types.ProcessID,
 	fault int,
-	predicate OutputPredicate,
 ) ConditionsCollector {
 	c := new(collector)
 	c.ctx, c.cancel = context.WithCancel(ctx)
@@ -90,7 +91,6 @@ func NewSignedConditionsCollector(
 
 	c.leader = leader
 	c.faults = fault
-	c.predicate = predicate
 	c.messages = make(map[types.ProcessID]Sent)
 	c.sendCh = make(chan sendEnvelope, 50)
 	c.collectedCh = make(chan collectedEnvelope, 50)
@@ -161,17 +161,17 @@ OUTER:
 			if len(definedMsgs) < c.processesCount-c.faults {
 				continue
 			}
-			if err := c.predicate(env.inner); err != nil {
-				continue
-			}
 			for _, msg := range definedMsgs {
 				err := c.validateSigned(msg.Sender, msg.Msg, msg.Sign)
 				if err != nil {
 					continue OUTER
 				}
 			}
+			err := c.receiver.OnCollected(env.inner)
+			if err != nil {
+				continue
+			}
 			c.collected = true
-			c.receiver.OnCollected(env.inner)
 		}
 	}
 }
@@ -182,7 +182,7 @@ func (c *collector) checkCollected() {
 	}
 
 	messages := utils.ValuesSlice(c.messages)
-	if err := c.predicate(messages); err != nil {
+	if err := c.receiver.ValidateCollected(messages); err != nil {
 		return
 	}
 
