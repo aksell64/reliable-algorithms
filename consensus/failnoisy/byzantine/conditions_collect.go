@@ -5,12 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reliable/logger"
 	"reliable/p2p"
 	"reliable/types"
 	"reliable/utils"
+
+	"github.com/rs/zerolog"
 )
 
 type ConditionsCollector interface {
+	types.Deliverer
 	Start()
 	Input(i []byte) error
 	SetReceiver(receiver CollectReceiver)
@@ -58,6 +62,7 @@ type collector struct {
 	cancel         context.CancelFunc
 	self           types.ProcessID
 	id             types.Identify
+	epoch          int
 	processes      []types.ProcessID
 	processesCount int
 	al             p2p.Link
@@ -69,6 +74,7 @@ type collector struct {
 	collected      bool
 	receiver       CollectReceiver
 	stopCh         chan struct{}
+	logger         zerolog.Logger
 }
 
 func NewSignedConditionsCollector(
@@ -79,6 +85,7 @@ func NewSignedConditionsCollector(
 	al p2p.Link,
 	leader types.ProcessID,
 	fault int,
+	epoch int,
 ) ConditionsCollector {
 	c := new(collector)
 	c.ctx, c.cancel = context.WithCancel(ctx)
@@ -87,14 +94,24 @@ func NewSignedConditionsCollector(
 	c.processes = processes
 	c.al = al
 	c.Deliverer = types.NewUnaryDeliverer(self)
-	c.al.AddDeliverer(c)
 
 	c.leader = leader
 	c.faults = fault
+	c.processesCount = len(processes)
 	c.messages = make(map[types.ProcessID]Sent)
 	c.sendCh = make(chan sendEnvelope, 50)
 	c.collectedCh = make(chan collectedEnvelope, 50)
 	c.stopCh = make(chan struct{})
+	c.logger = logger.NewNodeScopeLogger(self, logger.Scope{"cc", "byz"})
+	c.epoch = epoch
+
+	c.logger.Info().
+		Str("leader", leader.String()).
+		Int("processes", len(processes)).
+		Int("faults", fault).
+		Int("threshold", len(processes)-fault).
+		Msg("created")
+
 	return c
 }
 
@@ -103,26 +120,34 @@ func (c *collector) SetReceiver(receiver CollectReceiver) {
 }
 
 func (c *collector) Input(i []byte) error {
+	c.logger.Info().
+		Str("to", c.leader.String()).
+		Msg("input: signing and sending state to leader")
+
 	signed, err := c.signedMsg(i)
 	if err != nil {
+		c.logger.Error().Err(err).Msg("input: sign failed")
 		return fmt.Errorf("sign: %w", err)
 	}
 
-	msg := NewCCSignedMsg(c.self, signed, i)
+	msg := NewCCSignedMsg(c.self, signed, i, c.epoch)
 	c.al.Send(c.leader, msg)
 	return nil
 }
 
 func (c *collector) Start() {
+	c.logger.Info().Msg("start")
 	go c.background()
 }
 
 func (c *collector) Stop() {
+	c.logger.Info().Msg("stopping")
 	c.al.RemoveDeliverer(c)
 	c.cancel()
 	<-c.stopCh
 	close(c.sendCh)
 	close(c.collectedCh)
+	c.logger.Info().Msg("stopped")
 }
 
 func (c *collector) background() {
@@ -132,10 +157,16 @@ OUTER:
 	for {
 		select {
 		case <-c.ctx.Done():
+			c.logger.Info().Msg("context cancelled, background exiting")
 			return
+
 		case env := <-c.sendCh:
 			err := c.validateSigned(env.from, env.msg, env.sing)
 			if err != nil {
+				c.logger.Warn().
+					Str("from", env.from.String()).
+					Err(err).
+					Msg("SEND: invalid signature, discarding")
 				continue
 			}
 			c.messages[env.from] = Sent{
@@ -143,13 +174,26 @@ OUTER:
 				Sign:   env.sing,
 				Msg:    env.msg,
 			}
+			c.logger.Info().
+				Str("from", env.from.String()).
+				Int("collected", len(c.messages)).
+				Int("threshold", c.processesCount-c.faults).
+				Msg("SEND: state accepted")
 			c.checkCollected()
 
 		case env := <-c.collectedCh:
 			if c.collected {
+				c.logger.Warn().
+					Str("from", env.from.String()).
+					Msg("COLLECTED: already collected, ignoring duplicate")
 				continue
 			}
 			if len(env.inner) < c.processesCount-c.faults {
+				c.logger.Warn().
+					Str("from", env.from.String()).
+					Int("got", len(env.inner)).
+					Int("threshold", c.processesCount-c.faults).
+					Msg("COLLECTED: not enough entries, ignoring")
 				continue
 			}
 			definedMsgs := make([]Sent, 0)
@@ -159,18 +203,37 @@ OUTER:
 				}
 			}
 			if len(definedMsgs) < c.processesCount-c.faults {
+				c.logger.Warn().
+					Str("from", env.from.String()).
+					Int("defined", len(definedMsgs)).
+					Int("threshold", c.processesCount-c.faults).
+					Msg("COLLECTED: not enough defined messages, ignoring")
 				continue
 			}
 			for _, msg := range definedMsgs {
 				err := c.validateSigned(msg.Sender, msg.Msg, msg.Sign)
 				if err != nil {
+					c.logger.Warn().
+						Str("from", env.from.String()).
+						Str("sender", msg.Sender.String()).
+						Err(err).
+						Msg("COLLECTED: signature verification failed, discarding")
 					continue OUTER
 				}
 			}
 			err := c.receiver.OnCollected(env.inner)
 			if err != nil {
+				c.logger.Warn().
+					Str("from", env.from.String()).
+					Err(err).
+					Msg("COLLECTED: OnCollected rejected")
 				continue
 			}
+			c.logger.Info().
+				Str("from", env.from.String()).
+				Int("total", len(env.inner)).
+				Int("defined", len(definedMsgs)).
+				Msg("COLLECTED: accepted, triggering epoch consensus")
 			c.collected = true
 		}
 	}
@@ -183,6 +246,10 @@ func (c *collector) checkCollected() {
 
 	messages := utils.ValuesSlice(c.messages)
 	if err := c.receiver.ValidateCollected(messages); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Int("messagesCount", len(messages)).
+			Msg("checkCollected: validation failed, not broadcasting")
 		return
 	}
 
@@ -195,7 +262,7 @@ func (c *collector) checkCollected() {
 		}
 	}
 
-	msg := NewCCCollectedMsg(c.self)
+	msg := NewCCCollectedMsg(c.self, c.epoch)
 	for _, m := range messages {
 		msg = msg.AddMsg(CCCollectInner{
 			Sender: m.Sender,
@@ -212,6 +279,12 @@ func (c *collector) checkCollected() {
 			Sign:   m.Sign,
 		})
 	}
+
+	c.logger.Info().
+		Int("defined", len(messages)).
+		Int("undefined", len(undefinedMgs)).
+		Int("total", len(c.processes)).
+		Msg("checkCollected: threshold reached, broadcasting COLLECTED")
 
 	for _, pid := range c.processes {
 		c.al.Send(pid, msg)
@@ -251,6 +324,10 @@ func (c *collector) validateSigned(from types.ProcessID, msg []byte, sign []byte
 func (c *collector) Deliver(msg types.Message) {
 	switch m := msg.(type) {
 	case CCCollectedMsg:
+		c.logger.Info().
+			Str("from", m.From().String()).
+			Int("innerCount", len(m.Inner)).
+			Msg("deliver: COLLECTED received")
 		env := collectedEnvelope{
 			from:  m.From(),
 			inner: make([]Sent, 0),
@@ -265,17 +342,32 @@ func (c *collector) Deliver(msg types.Message) {
 		go func() {
 			select {
 			case <-c.ctx.Done():
+				return
+			default:
+			}
+
+			select {
+			case <-c.ctx.Done():
 			case c.collectedCh <- env:
 			}
 		}()
 
 	case CCSendMsg:
+		c.logger.Info().
+			Str("from", m.From().String()).
+			Msg("deliver: SEND received")
 		env := sendEnvelope{
 			from: m.From(),
 			msg:  m.Msg,
 			sing: m.Signed,
 		}
 		go func() {
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+			}
+
 			select {
 			case <-c.ctx.Done():
 			case c.sendCh <- env:

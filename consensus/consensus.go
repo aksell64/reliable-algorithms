@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"errors"
 	"reliable/logger"
 	"reliable/types"
 	"sync"
@@ -12,6 +13,39 @@ type Consensus interface {
 	Propose(v types.Value)
 	Decided() <-chan types.Value
 	Crashed() chan struct{}
+}
+
+func ProposeSync(ctx context.Context, node Consensus, val types.Value) (types.Value, error) {
+	node.Propose(val)
+
+	res, err := waitDecided(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+
+	if !val.Compare(res) {
+		return nil, errors.New("decided not equals proposed")
+	}
+
+	return res, nil
+}
+
+func Sync(ctx context.Context, node Consensus) (types.Value, error) {
+	return waitDecided(ctx, node)
+}
+
+func waitDecided(ctx context.Context, node Consensus) (types.Value, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result, ok := <-node.Decided():
+		if !ok {
+			return nil, errors.New("crashed")
+		}
+		return result, nil
+	case <-node.Crashed():
+		return nil, errors.New("crashed")
+	}
 }
 
 type DeterministicSelector interface {

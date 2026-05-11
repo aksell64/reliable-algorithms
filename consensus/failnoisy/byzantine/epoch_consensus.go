@@ -9,6 +9,7 @@ import (
 	"reliable/types"
 	"reliable/types/fsm"
 	"reliable/utils/codec"
+	"strconv"
 	"sync"
 
 	"github.com/google/uuid"
@@ -60,10 +61,13 @@ type readWriteConsensus struct {
 	registry       *codec.Registry
 	stopOnce       sync.Once
 	stopCh         chan struct{}
+	validator      types.Validator
+	leaderDetector LeaderDetector
+	complained     bool
 	logger         zerolog.Logger
 }
 
-func newEpochConsensus(
+func newRWConsensus(
 	ctx context.Context,
 	al p2p.Link,
 	self types.ProcessID,
@@ -73,12 +77,13 @@ func newEpochConsensus(
 	registry *codec.Registry,
 	collector ConditionsCollector,
 	l *zerolog.Logger,
+	validator types.Validator,
+	leaderDetector LeaderDetector,
 ) *readWriteConsensus {
 	c := new(readWriteConsensus)
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.Deliverer = types.NewUnaryDeliverer(self)
 	c.al = al
-	c.al.AddDeliverer(c)
 	c.self = self
 	c.processes = processes
 	c.faults = faults
@@ -99,6 +104,8 @@ func newEpochConsensus(
 	c.decideCh = make(chan types.Value, 1)
 	c.abortedCh = make(chan AbortedState, 1)
 	c.stopCh = make(chan struct{}, 1)
+	c.validator = validator
+	c.leaderDetector = leaderDetector
 	return c
 }
 
@@ -113,6 +120,18 @@ func (c *readWriteConsensus) StartEpoch(
 	c.epoch = epoch
 	c.leader = leader
 	c.state = current
+
+	c.logger = logger.NewNodeScopeLoggerFrom(c.logger,
+		logger.Scope{"leader", leader.String()},
+		logger.Scope{"epoch", strconv.Itoa(epoch)},
+	)
+
+	c.logger.Info().
+		Any("stateVal", current.Value).
+		Int("stateEpoch", current.Epoch).
+		Bool("isLeader", c.leader == c.self).
+		Msg("epoch started")
+
 	go c.eventLoop()
 }
 
@@ -137,6 +156,7 @@ func (c *readWriteConsensus) Epoch() int {
 }
 
 func (c *readWriteConsensus) eventLoop() {
+	defer close(c.stopCh)
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -176,6 +196,10 @@ func (c *readWriteConsensus) runCollectorInput(val []byte) {
 
 func (c *readWriteConsensus) handlePropose(evt proposeEvt) {
 	if c.leader != c.self {
+		c.logger.Warn().
+			Str("val", evt.val.String()).
+			Str("leader", c.leader.String()).
+			Msg("propose ignored: not leader")
 		return
 	}
 
@@ -184,7 +208,12 @@ func (c *readWriteConsensus) handlePropose(evt proposeEvt) {
 		c.state.Value = &cpValue
 	}
 
-	msg := NewRwReadMsg(c.self)
+	c.logger.Info().
+		Str("val", evt.val.String()).
+		Any("stateVal", c.state.Value).
+		Msg("leader proposing: broadcasting READ to all")
+
+	msg := NewRwReadMsg(c.self, c.epoch)
 	go func() {
 		for _, p := range c.processes {
 			c.al.Send(p, msg)
@@ -194,8 +223,18 @@ func (c *readWriteConsensus) handlePropose(evt proposeEvt) {
 
 func (c *readWriteConsensus) handleRead(evt readEvt) {
 	if c.leader != evt.from {
+		c.logger.Warn().
+			Str("from", evt.from.String()).
+			Str("leader", c.leader.String()).
+			Msg("READ ignored: sender is not leader")
 		return
 	}
+
+	c.logger.Info().
+		Str("from", evt.from.String()).
+		Any("stateVal", c.state.Value).
+		Int("stateEpoch", c.state.Epoch).
+		Msg("READ received from leader, sending state to collector")
 
 	stateRaw, err := c.encodeState()
 	if err != nil {
@@ -211,6 +250,10 @@ func (c *readWriteConsensus) handleRead(evt readEvt) {
 
 func (c *readWriteConsensus) handleCollected(evt collectedEvt) {
 	states := evt.states
+	c.logger.Info().
+		Int("statesCount", len(states)).
+		Msg("collected states received")
+
 	for _, state := range states {
 		val := state.Value
 		if val == nil {
@@ -219,6 +262,10 @@ func (c *readWriteConsensus) handleCollected(evt collectedEvt) {
 		epoch := state.Epoch
 
 		if c.checkBinds(epoch, val, states) {
+			c.logger.Info().
+				Any("val", val).
+				Int("epoch", epoch).
+				Msg("collected: value binds, starting write")
 			c.startWrite(*val)
 			return
 		}
@@ -232,12 +279,19 @@ func (c *readWriteConsensus) handleCollected(evt collectedEvt) {
 			}
 			for _, other := range states {
 				if other.Value == val {
+					c.logger.Info().
+						Any("val", val).
+						Msg("collected: unbound, picking first available value, starting write")
 					c.startWrite(*val)
 					return
 				}
 			}
 		}
 	}
+
+	c.logger.Warn().
+		Int("statesCount", len(states)).
+		Msg("collected: no value selected (neither binds nor unbound)")
 }
 
 func (c *readWriteConsensus) startWrite(temp types.Value) {
@@ -255,16 +309,38 @@ func (c *readWriteConsensus) startWrite(temp types.Value) {
 		Value: &temp,
 	})
 
+	c.logger.Info().
+		Str("val", temp.String()).
+		Int("writeSetSize", len(c.state.WriteSet.Snapshots)).
+		Msg("broadcasting WRITE")
+
 	c.broadcastWrite(temp)
 }
 
 func (c *readWriteConsensus) handleWrite(evt writeEvt) {
+	err := c.validator.Validate(evt.val)
+	if err != nil {
+		if !c.complained && evt.from == c.leader {
+			c.logger.Error().Err(err).Msg("value invalid from leader")
+			c.leaderDetector.OnComplain(evt.from)
+			c.complained = true
+		}
+		return
+	}
+
 	if val, exists := c.written[evt.from]; exists && evt.val == val {
 		return
 	}
 
 	c.written[evt.from] = evt.val
 	c.writtenCounts[evt.val] = c.writtenCounts[evt.val] + 1
+
+	c.logger.Info().
+		Str("from", evt.from.String()).
+		Str("val", evt.val.String()).
+		Int("count", c.writtenCounts[evt.val]).
+		Int("quorum", c.byzantineQuorum()).
+		Msg("WRITE received")
 
 	var (
 		shouldAccept bool
@@ -283,6 +359,16 @@ func (c *readWriteConsensus) handleWrite(evt writeEvt) {
 		return
 	}
 
+	c.logger.Info().
+		Str("val", acceptVal.String()).
+		Int("writtenCount", c.writtenCounts[acceptVal]).
+		Msg("WRITE quorum reached, updating state and broadcasting ACCEPT")
+
+	c.state.Epoch = c.epoch
+	c.state.Value = &acceptVal
+	c.written = make(map[types.ProcessID]types.Value)
+	c.writtenCounts = make(map[types.Value]int)
+
 	raw, err := c.registry.Marshal(acceptVal)
 	if err != nil {
 		c.triggerErr(fmt.Errorf("handle write: marshal accepted: %w", err))
@@ -292,6 +378,7 @@ func (c *readWriteConsensus) handleWrite(evt writeEvt) {
 	msg := RWAcceptMsg{
 		BaseMsg:  messages.NewBase(uuid.New(), c.self, RWAcceptMsgName),
 		ValueRaw: messages.NewRaw(raw, acceptVal.Type()),
+		Ts:       c.epoch,
 	}
 
 	go func() {
@@ -307,6 +394,13 @@ func (c *readWriteConsensus) handleAccept(evt acceptEvt) {
 	}
 	c.accepted[evt.from] = evt.val
 	c.acceptedCounts[evt.val] = c.acceptedCounts[evt.val] + 1
+
+	c.logger.Info().
+		Str("from", evt.from.String()).
+		Str("val", evt.val.String()).
+		Int("count", c.acceptedCounts[evt.val]).
+		Int("quorum", c.byzantineQuorum()).
+		Msg("ACCEPT received")
 
 	var (
 		shouldDecide bool
@@ -325,6 +419,11 @@ func (c *readWriteConsensus) handleAccept(evt acceptEvt) {
 		return
 	}
 
+	c.logger.Info().
+		Str("val", decideVal.String()).
+		Int("acceptedCount", c.acceptedCounts[decideVal]).
+		Msg("ACCEPT quorum reached, deciding")
+
 	go c.decide(decideVal)
 }
 
@@ -342,7 +441,7 @@ func (c *readWriteConsensus) checkQuorumHighest(epoch int, val *types.Value, sta
 		exists       bool
 	)
 	for _, state := range states {
-		if state.Epoch == epoch && state.Value == val {
+		if state.Epoch == epoch && state.Value != nil && val != nil && *state.Value == *val {
 			exists = true
 			countDefined++
 		}
@@ -361,7 +460,7 @@ func (c *readWriteConsensus) checkCertified(epoch int, val *types.Value, states 
 	count := 0
 	for _, state := range states {
 		for _, snap := range state.WriteSet.Snapshots {
-			if snap.Value == val && snap.Epoch <= epoch {
+			if snap.Value != nil && val != nil && *snap.Value == *val && snap.Epoch <= epoch {
 				count++
 			}
 		}
@@ -408,8 +507,8 @@ func (c *readWriteConsensus) broadcastWrite(val types.Value) {
 		return
 	}
 
-	rawMsg := messages.NewRaw(raw, RWWriteMsgName)
-	msg := NewRWWriteMsg(c.self, rawMsg)
+	rawMsg := messages.NewRaw(raw, val.Type())
+	msg := NewRWWriteMsg(c.self, rawMsg, c.epoch)
 
 	go func() {
 		for _, p := range c.processes {
@@ -419,11 +518,12 @@ func (c *readWriteConsensus) broadcastWrite(val types.Value) {
 }
 
 func (c *readWriteConsensus) handleErr(err error) {
-	c.logger.Error().Err(err).Msg("eventLoop")
+	c.logger.Error().Err(err).Msg("eventLoop error")
 }
 
 func (c *readWriteConsensus) decide(v types.Value) {
 	c.stopOnce.Do(func() {
+		c.logger.Info().Str("val", v.String()).Int("epoch", c.epoch).Msg("decided")
 		c.decideCh <- v
 		c.cancel()
 		<-c.stopCh
@@ -432,6 +532,11 @@ func (c *readWriteConsensus) decide(v types.Value) {
 }
 
 func (c *readWriteConsensus) abort() {
+	c.logger.Info().
+		Int("epoch", c.epoch).
+		Any("stateVal", c.state.Value).
+		Int("stateEpoch", c.state.Epoch).
+		Msg("aborting epoch")
 	c.cancel()
 	<-c.stopCh
 
@@ -509,6 +614,12 @@ func (c *readWriteConsensus) OnCollected(sent []Sent) error {
 
 func (c *readWriteConsensus) triggerApply(evt fsm.Event) {
 	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
+	select {
 	case c.evtsCh <- evt:
 	case <-c.ctx.Done():
 	}
@@ -536,6 +647,7 @@ func (c *readWriteConsensus) encodeState() ([]byte, error) {
 		ValueRaw:    valRaw,
 		ValueEpoch:  c.state.Epoch,
 		WriteSetRaw: snaps,
+		Ts:          c.epoch,
 	}
 
 	raw, err := c.registry.Marshal(msg)
@@ -626,7 +738,7 @@ func (c *readWriteConsensus) Deliver(m types.Message) {
 		err = c.handleAcceptDelivered(msg)
 	}
 	if err != nil {
-		c.logger.Error().Err(err).Msg("handle deliverer")
+		c.logger.Error().Err(err).Msg("deliver error")
 	}
 }
 

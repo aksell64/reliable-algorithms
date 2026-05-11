@@ -44,8 +44,7 @@ func (net *inMemNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	select {
 	case c.buf <- msg:
 	default:
-		// cringe optimization
-		c.buf <- msg
+		go func() { c.buf <- msg }()
 	}
 }
 
@@ -82,15 +81,21 @@ func (net *inMemNetwork) getOrCreateConn(from, to types.ProcessID) *conn {
 	}
 
 	for range bufReadersCount {
-		go net.readBuf(c.buf, deliverer)
+		go net.readBuff(c.buf, deliverer)
 	}
 
 	return c
 }
 
-func (net *inMemNetwork) readBuf(buf chan types.Message, deliverer types.Deliverer) {
-	for msg := range buf {
+func (net *inMemNetwork) readBuff(buf chan types.Message, deliverer types.Deliverer) {
+	forEachBuffMsg(buf, func(msg types.Message) {
 		deliverer.Deliver(msg)
+	})
+}
+
+func forEachBuffMsg(buf chan types.Message, f func(msg types.Message)) {
+	for msg := range buf {
+		f(msg)
 	}
 }
 

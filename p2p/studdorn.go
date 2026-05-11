@@ -64,10 +64,7 @@ func (l *stubbornP2PLinks) Stop() {
 
 func (l *stubbornP2PLinks) Send(to types.ProcessID, msg types.Message) {
 	l.base.Send(to, msg)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.sent = append(l.sent, sent{to: to, msg: msg})
+	l.appendSent(sent{to: to, msg: msg})
 }
 
 func (l *stubbornP2PLinks) Deliver(msg types.Message) {
@@ -103,6 +100,12 @@ func (l *stubbornP2PLinks) nextSent() []sent {
 	msgs := l.sent[:sentLen]
 	l.sent = l.sent[0:]
 	return msgs
+}
+
+func (l *stubbornP2PLinks) appendSent(s sent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, s)
 }
 
 func (l *stubbornP2PLinks) Instance() string {

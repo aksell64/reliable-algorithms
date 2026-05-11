@@ -27,3 +27,21 @@ func DefaultBroadcastNodeSelector() BroadcastNodeSelector {
 		return true
 	}
 }
+
+func addToProcessesSlice(slice *[]types.ProcessID, p types.ProcessID) {
+	for _, pp := range *slice {
+		if pp == p {
+			return
+		}
+	}
+	*slice = append(*slice, p)
+}
+
+func removeFromProcessesSlice(slice *[]types.ProcessID, p types.ProcessID) {
+	for i, pp := range *slice {
+		if pp == p {
+			*slice = append((*slice)[:i], (*slice)[i+1:]...)
+			return
+		}
+	}
+}

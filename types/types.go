@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/binary"
+	"errors"
 	"reliable/utils/codec"
 	"strconv"
 	"sync"
@@ -17,6 +18,14 @@ func (id ProcessID) String() string {
 
 func (id ProcessID) Bytes() []byte {
 	return []byte(id.String())
+}
+
+func (id ProcessID) Int64() int64 {
+	return int64(id)
+}
+
+func (id ProcessID) Int() int {
+	return int(id)
 }
 
 func IDFromBytes(byt []byte) (ProcessID, error) {
@@ -87,6 +96,32 @@ func (v intValue) Bytes() ([]byte, error) {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(v))
 	return b, nil
+}
+
+type Validator interface {
+	Validate(value Value) error
+}
+
+type intValueValidator struct{}
+
+func IntValueValidator() Validator {
+	return &intValueValidator{}
+}
+
+func (v *intValueValidator) Validate(value Value) error {
+	zero := IntValue(0)
+	if value.Less(zero) {
+		return errors.New("value less than zero")
+	}
+
+	return nil
+}
+
+type NoopValidator struct {
+}
+
+func (v NoopValidator) Validate(value Value) error {
+	return nil
 }
 
 func RegisterIntValue(r *codec.Registry) {

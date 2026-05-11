@@ -54,7 +54,7 @@ func (ud UnimplementedDeliverer) ID() uuid.UUID                                 
 func (ud UnimplementedDeliverer) ProcessID() ProcessID                              { return ud.pid }
 func (ud UnimplementedDeliverer) Instance() string                                  { return "unimplemented" }
 
-type multyDeliverer struct {
+type multiDeliverer struct {
 	UnimplementedDeliverer
 	fallbackDeliverers []Deliverer
 	routes             map[string][]Deliverer
@@ -62,14 +62,14 @@ type multyDeliverer struct {
 }
 
 func NewUnaryDeliverer(pid ProcessID) Deliverer {
-	return newMultyDeliverer(pid)
+	return newMultiDeliverer(pid)
 }
 
-func newMultyDeliverer(pid ProcessID, d ...Deliverer) *multyDeliverer {
+func newMultiDeliverer(pid ProcessID, d ...Deliverer) *multiDeliverer {
 	if len(d) == 0 {
 		d = make([]Deliverer, 0)
 	}
-	md := &multyDeliverer{
+	md := &multiDeliverer{
 		fallbackDeliverers:     d,
 		UnimplementedDeliverer: NewUnimplementedDeliverer(pid),
 		routes:                 make(map[string][]Deliverer),
@@ -78,7 +78,7 @@ func newMultyDeliverer(pid ProcessID, d ...Deliverer) *multyDeliverer {
 	return md
 }
 
-func (md *multyDeliverer) Instance() string {
+func (md *multiDeliverer) Instance() string {
 	if md.fallbackDeliverers == nil {
 		return "empty"
 	}
@@ -90,14 +90,14 @@ func (md *multyDeliverer) Instance() string {
 	return instance
 }
 
-func (md *multyDeliverer) Deliver(msg Message) {
+func (md *multiDeliverer) Deliver(msg Message) {
 	deliverers := md.getDeliverers(msg)
 	for _, d := range deliverers {
 		d.Deliver(msg)
 	}
 }
 
-func (md *multyDeliverer) getDeliverers(msg Message) []Deliverer {
+func (md *multiDeliverer) getDeliverers(msg Message) []Deliverer {
 	deliverers := make([]Deliverer, 0)
 
 	md.mu.RLock()
@@ -116,7 +116,7 @@ func (md *multyDeliverer) getDeliverers(msg Message) []Deliverer {
 	return deliverers
 }
 
-func (md *multyDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOption) {
+func (md *multiDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOption) {
 	cfg := buildDelivererConfig(opts)
 
 	md.mu.Lock()
@@ -132,18 +132,18 @@ func (md *multyDeliverer) AddDeliverer(d Deliverer, opts ...DelivererOption) {
 	md.fallbackDeliverers = append(md.fallbackDeliverers, d)
 }
 
-func (md *multyDeliverer) RemoveDeliverer(delivererToRemove Deliverer) {
+func (md *multiDeliverer) RemoveDeliverer(delivererToRemove Deliverer) {
 	md.mu.Lock()
 	defer md.mu.Unlock()
 	md.removeDeliverer(delivererToRemove)
 }
 
-func (md *multyDeliverer) removeDeliverer(delivererToRemove Deliverer) bool {
+func (md *multiDeliverer) removeDeliverer(delivererToRemove Deliverer) bool {
 	removed := false
 
 	for i := len(md.fallbackDeliverers) - 1; i >= 0; i-- {
 		current := md.fallbackDeliverers[i]
-		if nestedMD, ok := current.(*multyDeliverer); ok {
+		if nestedMD, ok := current.(*multiDeliverer); ok {
 			if nestedMD.removeDeliverer(delivererToRemove) {
 				removed = true
 				if len(nestedMD.fallbackDeliverers) == 0 && len(nestedMD.routes) == 0 {

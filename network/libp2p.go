@@ -646,7 +646,6 @@ func (n *libp2pNetwork) markClusterReady() {
 
 // waitForCluster — блокирует до тех пор, пока все N пиров не обнаружены.
 func (n *libp2pNetwork) waitForCluster() error {
-	// Фаза 1: ждём discovery всех пиров
 	select {
 	case <-n.clusterReady:
 		n.logger.Info().Msg("[Bootstrap] Phase 1 done: all peers discovered")
@@ -659,7 +658,6 @@ func (n *libp2pNetwork) waitForCluster() error {
 		return n.ctx.Err()
 	}
 
-	// Фаза 2: ждём ready от всех
 	select {
 	case <-n.allReady:
 		n.logger.Info().Msg("[Bootstrap] Phase 2 done: all peers confirmed ready ✅")
@@ -679,19 +677,19 @@ func (n *libp2pNetwork) handleStream(s network.Stream) {
 
 	data, err := readLengthPrefixed(s)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("stream read")
+		logger.Logger().Error().Err(err).Msg("stream read")
 		return
 	}
 
 	var wire wireMessage
 	if err := json.Unmarshal(data, &wire); err != nil {
-		n.logger.Error().Err(err).Msg("wire unmarshal")
+		logger.Logger().Error().Err(err).Msg("wire unmarshal")
 		return
 	}
 
 	msg, err := n.unmarshal(wire.Payload)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("wire payload unmarshal")
+		logger.Logger().Err(err).Msg("wire payload unmarshal")
 		return
 	}
 
@@ -701,7 +699,7 @@ func (n *libp2pNetwork) handleStream(s network.Stream) {
 func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	payload, err := n.marshal(msg)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("marshal send msg")
+		logger.Logger().Error().Err(err).Msg("marshal send msg")
 		return
 	}
 
@@ -711,7 +709,7 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	n.mu.RUnlock()
 
 	if !ok {
-		n.logger.Error().Err(err).
+		logger.Logger().Err(err).
 			Str("peer", peerID.String()).
 			Msg("no peer found for PID (cluster not ready?)")
 		return
@@ -724,7 +722,7 @@ func (n *libp2pNetwork) Send(from, to types.ProcessID, msg types.Message) {
 	}
 	data, err := json.Marshal(wire)
 	if err != nil {
-		n.logger.Error().Err(err).Msg("wire marshal msg")
+		logger.Logger().Error().Err(err).Msg("wire marshal msg")
 		return
 	}
 
@@ -747,13 +745,13 @@ func (n *libp2pNetwork) sendToPeerByID(peerID peer.ID, data []byte) {
 
 	s, err := n.host.NewStream(ctx, peerID, ProtocolID)
 	if err != nil {
-		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("stream open")
+		logger.Logger().Err(err).Str("peer", peerID.String()).Msg("stream open")
 		return
 	}
 	defer s.Close()
 
 	if err := writeLengthPrefixed(s, data); err != nil {
-		n.logger.Error().Err(err).Str("peer", peerID.String()).Msg("write to stream")
+		logger.Logger().Err(err).Str("peer", peerID.String()).Msg("write to stream")
 	}
 }
 
