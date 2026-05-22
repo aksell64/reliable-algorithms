@@ -2,7 +2,9 @@ package messages
 
 import (
 	"bytes"
+	"fmt"
 	"reliable/types"
+	"reliable/utils/codec"
 
 	"github.com/google/uuid"
 )
@@ -55,4 +57,18 @@ func NewRaw(raw []byte, typ string) RawMsg {
 
 func (msg RawMsg) Equal(other RawMsg) bool {
 	return bytes.Equal(msg.Raw, other.Raw) && msg.RawType == other.RawType
+}
+
+func UnmarshalRawWithRegistry(raw RawMsg, registry *codec.Registry) (types.Message, error) {
+	msgTyp, err := registry.Unmarshal(raw.Raw, raw.RawType)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+
+	msg, ok := msgTyp.(types.Message)
+	if !ok {
+		return nil, fmt.Errorf("unmarshal raw msg type: %v", msgTyp)
+	}
+
+	return msg, nil
 }

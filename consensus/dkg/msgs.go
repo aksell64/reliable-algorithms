@@ -3,6 +3,7 @@ package dkg
 import (
 	"reliable/messages"
 	"reliable/types"
+	"reliable/utils/crypto"
 )
 
 const (
@@ -16,7 +17,7 @@ const (
 
 type CommitmentsMsg struct {
 	messages.BaseMsg
-	Comms []*ZpElement
+	Comms []*crypto.ZpElement
 }
 
 type ShareMsg struct {
@@ -40,12 +41,12 @@ type RevealShareMsg struct {
 
 type PubCommitmentsMsg struct {
 	messages.BaseMsg
-	Comms []*ZpElement
+	Comms []*crypto.ZpElement
 }
 
 type Complaint2Msg struct {
 	messages.BaseMsg
 	Dealer       types.ProcessID
 	InitShare    Share
-	InvalidShare *ZpElement
+	InvalidShare *crypto.ZpElement
 }

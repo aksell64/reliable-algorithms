@@ -1,210 +1,147 @@
 package crypto
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
+	"errors"
+	"fmt"
 	"math/big"
-
-	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
-	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
-// =============================================================
-// Хэширование произвольного входа на кривую G1
-// =============================================================
+// Params holds the public parameters for the DKG protocol.
+// p — safe prime, q — prime order of subgroup, g and h — generators of the subgroup of order q in Z*p.
+// It must hold: g^q ≡ 1 (mod p), h^q ≡ 1 (mod p), and nobody knows log_g(h).
+type Params struct {
+	P *big.Int // safe prime modulus
+	Q *big.Int // prime order of subgroup, p = 2q + 1
+	G *big.Int // generator of subgroup of order q
+	H *big.Int // second generator, discrete log relation to G unknown
+}
 
-// HashToG1 — хэширует произвольные байты в точку на G1.
-// Использует стандартный метод hash-to-curve (RFC 9380, suite BLS12381G1_XMD:SHA-256_SSWU_RO_).
-// dst — domain separation tag, уникальный для протокола.
-func HashToG1(msg []byte, dst []byte) (bls12381.G1Affine, error) {
-	// gnark-crypto реализует полный hash-to-curve по RFC 9380
-	point, err := bls12381.HashToG1(msg, dst)
-	if err != nil {
-		return bls12381.G1Affine{}, err
+// ZpElement represents an element of the quotient ring Z/pZ (ring of residues modulo p).
+// In the general case this is a ring; when p is prime, Z/pZ is a field.
+// The caller is responsible for ensuring that operations used are valid
+// for the algebraic structure implied by the choice of modulus.
+//
+// ZpElement stores a value reduced modulo P.
+type ZpElement struct {
+	Value *big.Int
+	P     *big.Int
+}
+
+// NewZpElement creates a ZpElement, reducing value mod p.
+func NewZpElement(value *big.Int, p *big.Int) *ZpElement {
+	v := new(big.Int).Mod(value, p)
+	return &ZpElement{Value: v, P: p}
+}
+
+// RandomZp generates a cryptographically random element in Z/pZ \ {0}.
+func RandomZp(p *big.Int) (*ZpElement, error) {
+	for {
+		v, err := rand.Int(rand.Reader, p)
+		if err != nil {
+			return nil, fmt.Errorf("random generation failed: %w", err)
+		}
+		if v.Sign() != 0 {
+			return &ZpElement{Value: v, P: p}, nil
+		}
 	}
-	return point, nil
 }
 
-// HashToG1Simple — упрощённая обёртка с дефолтным DST для Common Coin.
-func HashToG1Simple(roundID []byte) (bls12381.G1Affine, error) {
-	dst := []byte("COMMON-COIN-BLS12381-G1_XMD:SHA-256_SSWU_RO_")
-	return HashToG1(roundID, dst)
+// ZpZero returns the zero element in Z/pZ.
+func ZpZero(p *big.Int) *ZpElement {
+	return &ZpElement{Value: big.NewInt(0), P: p}
 }
 
-// =============================================================
-// Операции над скалярами (поле Fr — порядок подгруппы)
-// =============================================================
-
-// ScalarRandom — генерирует случайный скаляр из Fr.
-func ScalarRandom() (fr.Element, error) {
-	var s fr.Element
-	_, err := s.SetRandom()
-	return s, err
+// ZpOne returns the multiplicative identity in Z/pZ.
+func ZpOne(p *big.Int) *ZpElement {
+	return &ZpElement{Value: big.NewInt(1), P: p}
 }
 
-// ScalarFromInt — создаёт скаляр из int64.
-func ScalarFromInt(v int64) fr.Element {
-	var s fr.Element
-	s.SetInt64(v)
-	return s
+// ZpFromInt64 creates a ZpElement from an int64 value.
+func ZpFromInt64(val int64, p *big.Int) *ZpElement {
+	v := new(big.Int).SetInt64(val)
+	v.Mod(v, p)
+	return &ZpElement{Value: v, P: p}
 }
 
-// ScalarInverse — мультипликативный обратный: s^{-1} mod q.
-func ScalarInverse(s fr.Element) fr.Element {
-	var inv fr.Element
-	inv.Inverse(&s)
-	return inv
-}
-
-// ScalarMul — умножение двух скаляров: a * b mod q.
-func ScalarMul(a, b fr.Element) fr.Element {
-	var result fr.Element
-	result.Mul(&a, &b)
-	return result
-}
-
-// ScalarAdd — сложение двух скаляров: a + b mod q.
-func ScalarAdd(a, b fr.Element) fr.Element {
-	var result fr.Element
-	result.Add(&a, &b)
-	return result
-}
-
-// ScalarSub — вычитание: a - b mod q.
-func ScalarSub(a, b fr.Element) fr.Element {
-	var result fr.Element
-	result.Sub(&a, &b)
-	return result
-}
-
-// ScalarNeg — отрицание: -s mod q.
-func ScalarNeg(s fr.Element) fr.Element {
-	var neg fr.Element
-	neg.Neg(&s)
-	return neg
-}
-
-// =============================================================
-// Операции над точками G1
-// =============================================================
-
-// G1Generator — возвращает генератор группы G1.
-func G1Generator() bls12381.G1Affine {
-	_, _, g1, _ := bls12381.Generators()
-	return g1
-}
-
-// G1ScalarMul — умножение точки на скаляр: [s]P.
-func G1ScalarMul(point bls12381.G1Affine, scalar fr.Element) bls12381.G1Affine {
-	var result bls12381.G1Affine
-	var sBigInt big.Int
-	scalar.BigInt(&sBigInt)
-	result.ScalarMultiplication(&point, &sBigInt)
-	return result
-}
-
-// G1Add — сложение двух точек на G1.
-func G1Add(p1, p2 bls12381.G1Affine) bls12381.G1Affine {
-	var p1Jac bls12381.G1Jac
-	p1Jac.FromAffine(&p1)
-
-	var p2Jac bls12381.G1Jac
-	p2Jac.FromAffine(&p2)
-
-	p1Jac.AddAssign(&p2Jac)
-
-	var result bls12381.G1Affine
-	result.FromJacobian(&p1Jac)
-	return result
-}
-
-// G1Neg — отрицание точки (отражение по оси X).
-func G1Neg(p bls12381.G1Affine) bls12381.G1Affine {
-	var neg bls12381.G1Affine
-	neg.Neg(&p)
-	return neg
-}
-
-// G1IsOnCurve — проверка что точка лежит на кривой.
-func G1IsOnCurve(p bls12381.G1Affine) bool {
-	return p.IsOnCurve()
-}
-
-// G1IsInSubgroup — проверка что точка в правильной подгруппе порядка q.
-func G1IsInSubgroup(p bls12381.G1Affine) bool {
-	return p.IsInSubGroup()
-}
-
-// =============================================================
-// Операции над точками G2
-// =============================================================
-
-// G2Generator — возвращает генератор группы G2.
-func G2Generator() bls12381.G2Affine {
-	_, _, _, g2 := bls12381.Generators()
-	return g2
-}
-
-// G2ScalarMul — умножение точки G2 на скаляр: [s]Q.
-func G2ScalarMul(point bls12381.G2Affine, scalar fr.Element) bls12381.G2Affine {
-	var result bls12381.G2Affine
-	var sBigInt big.Int
-	scalar.BigInt(&sBigInt)
-	result.ScalarMultiplication(&point, &sBigInt)
-	return result
-}
-
-// =============================================================
-// Pairing — проверка подписей BLS
-// =============================================================
-
-// VerifyPairing проверяет: e(signature, g2) == e(messagePoint, publicKey)
-// Это стандартная проверка BLS-подписи.
-// signature ∈ G1, publicKey ∈ G2, messagePoint ∈ G1.
-func VerifyPairing(
-	signature bls12381.G1Affine,
-	publicKey bls12381.G2Affine,
-	messagePoint bls12381.G1Affine,
-) (bool, error) {
-	// Проверяем: e(sig, g2) == e(msg, pk)
-	// Эквивалентно: e(sig, g2) * e(-msg, pk) == 1 (identity в GT)
-	g2Gen := G2Generator()
-
-	negMsg := G1Neg(messagePoint)
-
-	// Multi-pairing: e(sig, g2) * e(-msg, pk) == 1?
-	ok, err := bls12381.PairingCheck(
-		[]bls12381.G1Affine{signature, negMsg},
-		[]bls12381.G2Affine{g2Gen, publicKey},
-	)
-	if err != nil {
-		return false, err
+// Clone returns a deep copy.
+func (a *ZpElement) Clone() *ZpElement {
+	return &ZpElement{
+		Value: new(big.Int).Set(a.Value),
+		P:     a.P,
 	}
-	return ok, nil
 }
 
-// =============================================================
-// Утилиты
-// =============================================================
-
-// CoinFromSignature — извлекает бит монетки из агрегированной подписи.
-// Берёт SHA-256 от сериализованной подписи, возвращает младший бит.
-func CoinFromSignature(signature bls12381.G1Affine) byte {
-	bytes := signature.Marshal()
-	hash := sha256.Sum256(bytes)
-	return hash[0] & 1
+// Add returns (a + b) mod p.
+func (a *ZpElement) Add(b *ZpElement) *ZpElement {
+	r := new(big.Int).Add(a.Value, b.Value)
+	r.Mod(r, a.P)
+	return &ZpElement{Value: r, P: a.P}
 }
 
-// SerializeG1 — сериализация точки G1 в байты (сжатый формат, 48 байт).
-func SerializeG1(p bls12381.G1Affine) []byte {
-	// Marshal возвращает несжатый формат (96 байт: X || Y)
-	// Для сжатого используем RawBytes (48 байт с флагом)
-	compressed := p.Bytes()
-	return compressed[:]
+// Sub returns (a - b) mod p.
+func (a *ZpElement) Sub(b *ZpElement) *ZpElement {
+	r := new(big.Int).Sub(a.Value, b.Value)
+	r.Mod(r, a.P)
+	return &ZpElement{Value: r, P: a.P}
 }
 
-// DeserializeG1 — десериализация точки G1 из байтов.
-func DeserializeG1(data []byte) (bls12381.G1Affine, error) {
-	var p bls12381.G1Affine
-	_, err := p.SetBytes(data)
-	return p, err
+// Mul returns (a * b) mod p.
+func (a *ZpElement) Mul(b *ZpElement) *ZpElement {
+	r := new(big.Int).Mul(a.Value, b.Value)
+	r.Mod(r, a.P)
+	return &ZpElement{Value: r, P: a.P}
+}
+
+// Neg returns (-a) mod p.
+func (a *ZpElement) Neg() *ZpElement {
+	r := new(big.Int).Neg(a.Value)
+	r.Mod(r, a.P)
+	return &ZpElement{Value: r, P: a.P}
+}
+
+func (a *ZpElement) Equal(b *ZpElement) bool {
+	return a.Value.Cmp(b.Value) == 0 && a.P.Cmp(b.P) == 0
+}
+
+// Inv returns the multiplicative inverse a^{-1} mod p.
+// Returns error if the inverse does not exist (a == 0 or gcd(a, p) != 1).
+func (a *ZpElement) Inv() (*ZpElement, error) {
+	if a.Value.Sign() == 0 {
+		return nil, errors.New("cannot invert zero element in Zp")
+	}
+	r := new(big.Int).ModInverse(a.Value, a.P)
+	if r == nil {
+		return nil, errors.New("modular inverse does not exist")
+	}
+	return &ZpElement{Value: r, P: a.P}, nil
+}
+
+// Div returns a * b^{-1} mod p.
+func (a *ZpElement) Div(b *ZpElement) (*ZpElement, error) {
+	bInv, err := b.Inv()
+	if err != nil {
+		return nil, err
+	}
+	return a.Mul(bInv), nil
+}
+
+// Exp returns a^exp mod p, where exp is a raw *big.Int.
+func (a *ZpElement) Exp(exp *big.Int) *ZpElement {
+	r := new(big.Int).Exp(a.Value, exp, a.P)
+	return &ZpElement{Value: r, P: a.P}
+}
+
+// IsZero checks if the element is zero.
+func (a *ZpElement) IsZero() bool {
+	return a.Value.Sign() == 0
+}
+
+// BigInt returns the underlying *big.Int value (not a copy — be careful).
+func (a *ZpElement) BigInt() *big.Int {
+	return a.Value
+}
+
+func (a *ZpElement) String() string {
+	return a.Value.String()
 }

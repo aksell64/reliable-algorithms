@@ -11,6 +11,11 @@ const (
 	ByzConsistenceEchoMessageName       = "byz_consistence_echo"
 	ByzConsistenceSignedEchoMessageName = "byz_consistence_signed_echo"
 	ByzConsistenceFinalMessageName      = "byz_consistence_final"
+	ByzReliableMessageName              = "byz_reliable"
+	ByzReliableEchoMessageName          = "byz_reliable_echo"
+	ByzReliableReadyMessageName         = "byz_reliable_ready"
+	ByzChannelMessageName               = "byz_channel"
+	ByzChannelDomainMessageName         = "byz_channel_domain"
 )
 
 type ReliableBroadcastMessage struct {
@@ -47,4 +52,40 @@ type ByzConsistenceFinalMessage struct {
 type ByzConsistenceFinalMessageSign struct {
 	ProcessID types.ProcessID
 	Sign      []byte
+}
+
+type ByzReliableMessage struct {
+	messages.BaseMsg
+	messages.RawMsg
+}
+
+type ByzReliableEchoMessage struct {
+	messages.BaseMsg
+	Inner messages.RawMsg
+}
+
+type ByzReliableReadyMessage struct {
+	messages.BaseMsg
+	Inner messages.RawMsg
+}
+
+type ByzChannelMessage struct {
+	messages.BaseMsg
+	Inner  messages.RawMsg
+	Sender types.ProcessID
+	Number int
+}
+
+func (msg ByzChannelMessage) Type() string {
+	return ByzChannelMessageName
+}
+
+type ByzChannelDomainMessage struct {
+	messages.BaseMsg
+	Inner messages.RawMsg
+	N     int
+}
+
+func (msg ByzChannelDomainMessage) Type() string {
+	return ByzChannelDomainMessageName
 }

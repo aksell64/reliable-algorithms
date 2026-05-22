@@ -4,12 +4,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"reliable/utils/crypto"
 )
 
 // polynomial represents a polynomial over Z_q.
 // Coefficients[0] is the free term (a₀), Coefficients[t] is the leading coefficient.
 type polynomial struct {
-	coefficients []*ZpElement
+	coefficients []*crypto.ZpElement
 	q            *big.Int
 }
 
@@ -24,7 +25,7 @@ type polynomialPair struct {
 // t — threshold (degree of polynomials), meaning t+1 participants needed for reconstruction.
 // The free term a₀ of F is the participant's secret contribution to the shared key.
 // The free term b₀ of FPrime is the masking value for the Pedersen commitment to a₀.
-func generatePolynomials(params *Params, t int) (*polynomialPair, error) {
+func generatePolynomials(params *crypto.Params, t int) (*polynomialPair, error) {
 	if t < 0 {
 		return nil, fmt.Errorf("polynomial degree t must be non-negative, got %d", t)
 	}
@@ -45,14 +46,14 @@ func generatePolynomials(params *Params, t int) (*polynomialPair, error) {
 // randomPolynomial generates a random polynomial of given degree with coefficients in Z_q.
 // All coefficients are uniformly random from [0, q-1].
 func randomPolynomial(q *big.Int, degree int) (*polynomial, error) {
-	coeffs := make([]*ZpElement, degree+1)
+	coeffs := make([]*crypto.ZpElement, degree+1)
 
 	for i := 0; i <= degree; i++ {
 		val, err := rand.Int(rand.Reader, q)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate random coefficient [%d]: %w", i, err)
 		}
-		coeffs[i] = NewZpElement(val, q)
+		coeffs[i] = crypto.NewZpElement(val, q)
 	}
 
 	return &polynomial{coefficients: coeffs, q: q}, nil
@@ -60,8 +61,8 @@ func randomPolynomial(q *big.Int, degree int) (*polynomial, error) {
 
 // Evaluate computes f(x) mod q using Horner's method.
 // x is given as int (participant index, 1-based).
-func (p *polynomial) Evaluate(x int) *ZpElement {
-	xElem := NewZpElement(big.NewInt(int64(x)), p.q)
+func (p *polynomial) Evaluate(x int) *crypto.ZpElement {
+	xElem := crypto.NewZpElement(big.NewInt(int64(x)), p.q)
 
 	// Horner's method: result = c[t]; for k = t-1..0: result = result*x + c[k]
 	degree := len(p.coefficients) - 1
@@ -81,6 +82,6 @@ func (p *polynomial) Degree() int {
 }
 
 // FreeTerm returns the free term (a₀) — the secret contribution of the participant.
-func (p *polynomial) FreeTerm() *ZpElement {
+func (p *polynomial) FreeTerm() *crypto.ZpElement {
 	return p.coefficients[0]
 }

@@ -125,9 +125,6 @@ func (b *authenticatedEchoBroadcaster) maybeDeliverInner() {
 			if from == fromOther {
 				continue
 			}
-			if !msg.BaseMsg.Equal(other.BaseMsg) {
-				continue
-			}
 			if !msg.Inner.Equal(other.Inner) {
 				continue
 			}
@@ -166,10 +163,12 @@ type signedEchoBroadcast struct {
 	identify  types.Identify
 	al        p2p.Link
 	registry  *codec.Registry
+	mu        sync.RWMutex
 }
 
 func NewSignedEchoBroadcaster(
 	self types.ProcessID,
+	sender types.ProcessID,
 	processes []types.ProcessID,
 	faults int,
 	identify types.Identify,
@@ -178,6 +177,7 @@ func NewSignedEchoBroadcaster(
 ) Broadcaster {
 	b := new(signedEchoBroadcast)
 	b.self = self
+	b.sender = sender
 	b.processes = processes
 	b.faults = faults
 	b.identify = identify
@@ -188,6 +188,10 @@ func NewSignedEchoBroadcaster(
 }
 
 func (b *signedEchoBroadcast) Broadcast(ctx context.Context, msg types.Message) {
+	if b.self != b.sender {
+		return
+	}
+
 	raw, err := b.registry.Marshal(msg)
 	if err != nil {
 		return
@@ -228,10 +232,14 @@ func (b *signedEchoBroadcast) Stop() {
 }
 
 func (b *signedEchoBroadcast) AddCorrect(p types.ProcessID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	addToProcessesSlice(&b.processes, p)
 }
 
 func (b *signedEchoBroadcast) RemoveCorrect(p types.ProcessID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	removeFromProcessesSlice(&b.processes, p)
 }
 
@@ -277,6 +285,10 @@ func (b *signedEchoBroadcast) handleBroadcastedMsg(msg ByzConsistenceMessage) {
 }
 
 func (b *signedEchoBroadcast) handleEchoMsg(msg ByzConsistenceSignedEchoMessage) {
+	if b.self != b.sender {
+		return
+	}
+
 	_, exists := b.echos[msg.From()]
 	if exists {
 		return
@@ -298,6 +310,8 @@ func (b *signedEchoBroadcast) handleEchoMsg(msg ByzConsistenceSignedEchoMessage)
 	}
 
 	b.echos[msg.From()] = msg
+
+	b.maybeBroadcastFinal()
 }
 
 func (b *signedEchoBroadcast) handleFinal(msg ByzConsistenceFinalMessage) {
@@ -305,12 +319,15 @@ func (b *signedEchoBroadcast) handleFinal(msg ByzConsistenceFinalMessage) {
 		return
 	}
 
+	seen := make(map[types.ProcessID]struct{}, len(msg.Signs))
 	validCount := 0
-	for from, other := range b.echos {
-		sign := other.Sign
+	for _, s := range msg.Signs {
+		if _, dup := seen[s.ProcessID]; dup {
+			continue
+		}
 
 		data := signData{
-			ProcessID: from,
+			ProcessID: s.ProcessID,
 			MsgType:   "ECHO",
 			Raw:       msg.Inner,
 		}
@@ -320,31 +337,40 @@ func (b *signedEchoBroadcast) handleFinal(msg ByzConsistenceFinalMessage) {
 			return
 		}
 
-		if err = b.identify.Verify(from, bytes, sign); err != nil {
+		if err = b.identify.Verify(s.ProcessID, bytes, s.Sign); err != nil {
 			continue
 		}
+		seen[s.ProcessID] = struct{}{}
 		validCount++
-
-		if validCount > (len(b.processes)+b.faults)/2 {
-			innerMsgTyp, err := b.registry.Unmarshal(msg.Inner.Raw, msg.Inner.RawType)
-			if err != nil {
-				return
-			}
-
-			innerMsg, ok := innerMsgTyp.(types.Message)
-			if !ok {
-				return
-			}
-
-			b.delivered = true
-			go b.Deliverer.Deliver(innerMsg)
-			return
-		}
 	}
+
+	if validCount <= (len(b.processes)+b.faults)/2 {
+		return
+	}
+
+	innerMsgTyp, err := b.registry.Unmarshal(msg.Inner.Raw, msg.Inner.RawType)
+	if err != nil {
+		return
+	}
+
+	innerMsg, ok := innerMsgTyp.(types.Message)
+	if !ok {
+		return
+	}
+
+	b.delivered = true
+	go b.Deliverer.Deliver(innerMsg)
 }
 
 func (b *signedEchoBroadcast) alBroadcast(msg types.Message) {
+	b.mu.RLock()
+	processes := make([]types.ProcessID, 0, len(b.processes))
 	for _, p := range b.processes {
+		processes = append(processes, p)
+	}
+	b.mu.RUnlock()
+
+	for _, p := range processes {
 		b.al.Send(p, msg)
 	}
 }
@@ -361,9 +387,6 @@ func (b *signedEchoBroadcast) maybeBroadcastFinal() {
 			if from == fromOther {
 				continue
 			}
-			if !msg.BaseMsg.Equal(other.BaseMsg) {
-				continue
-			}
 			if !msg.Inner.Equal(other.Inner) {
 				continue
 			}
@@ -372,19 +395,24 @@ func (b *signedEchoBroadcast) maybeBroadcastFinal() {
 
 			if processesCount > (len(b.processes)+b.faults)/2 {
 				b.sentFinal = true
+
 				finalMsg := ByzConsistenceFinalMessage{
 					BaseMsg: messages.NewBase(uuid.New(), b.self, ByzConsistenceFinalMessageName),
 					Inner:   msg.Inner,
-					Signs:   make([]ByzConsistenceFinalMessageSign, 0),
+					Signs:   make([]ByzConsistenceFinalMessageSign, 0, len(b.echos)),
 				}
 
-				for from, other := range b.echos {
-					sign := other.Sign
+				for pid, other := range b.echos {
+					if !other.Inner.Equal(msg.Inner) {
+						continue
+					}
 					finalMsg.Signs = append(finalMsg.Signs, ByzConsistenceFinalMessageSign{
-						Sign:      sign,
-						ProcessID: from,
+						ProcessID: pid,
+						Sign:      other.Sign,
 					})
 				}
+
+				b.alBroadcast(finalMsg)
 				return
 			}
 		}
