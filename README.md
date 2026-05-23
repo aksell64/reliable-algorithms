@@ -15,70 +15,51 @@ The book is a comprehensive guide to the fundamental abstractions and algorithms
 ## Topics Covered
 
 ### Basic Abstractions
-- Perfect Links
+- Perfect, Stubborn Links (in-memory, libp2p)
 - Best-Effort Broadcast
 - Reliable Broadcast
-- Uniform Reliable Broadcast
+- Byzantine Broadcast
+- Byzantine Channel
+
+### Election
+
+- Lower Epoch Election
+- Monarchical Election
+- Byzantine Rotating Election
 
 ### Failure Detection
 - Perfect Failure Detector
 - Eventually Perfect Failure Detector
 
-### Shared Memory
-- Regular Registers
-- Atomic Registers
 
 ### Consensus
-- Flooding Consensus
-- Hierarchical Consensus
-- Uniform Consensus
 
-### Total Order Broadcast
-- Consensus-Based Total Order Broadcast
+#### Fail-Silent
+
+- Randomized Consensus
+
+#### Fail-Noisy
+
+- Leader-Based Consensus
+- Byzantine Leader-Based Consensus
+
+#### Common-Coin
+
+- Commit Reveal Common Coin
+- TBLS Common Coin (In the future)
+
+### DKG
+
+- Feldman-Peterson DKG
 
 > **Note:** The list above reflects the scope of the book. Implementations are being added progressively.
 
-## Tech Stack
-
-- **Language:** Go
-- **No external dependencies** — pure standard library where possible
-
-## Getting Started
-
-### Prerequisites
-
-- Go 1.21 or higher
-
-### Clone
-```bash
-git clone https://github.com/aksell64/relible.git
-cd relible
-```
-
-### Run Tests
-```bash
-go test ./...
-```
-
-## Project Structure
-```
-relible/
-├── README.md
-├── go.mod
-└── ...          # packages organized by abstraction layer
-```
 
 ## Motivation
 
 The best way to understand distributed algorithms is to implement them. This project is a hands-on companion to the book, translating pseudocode into real, runnable Go code.
 
-## Contributing
 
-Contributions, suggestions, and discussions are welcome! Feel free to open an issue or submit a pull request.
-
-## License
-
-This project is open source. See the [LICENSE](LICENSE) file for details.
 
 ## References
 
