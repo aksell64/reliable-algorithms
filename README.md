@@ -53,7 +53,7 @@ The book is a comprehensive guide to the fundamental abstractions and algorithms
 
 ### DKG
 
-- Feldman-Peterson DKG
+-  Pederson-Feldman Verifiable Secret Sharing
 
 > **Note:** The list above reflects the scope of the book. Implementations are being added progressively.
 
