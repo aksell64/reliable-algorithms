@@ -41,6 +41,9 @@ The book is a comprehensive guide to the fundamental abstractions and algorithms
 #### Fail-Noisy
 
 - Leader-Based Consensus
+
+#### Byzantine
+
 - Byzantine Leader-Based Consensus
 
 #### Common-Coin
